@@ -36,7 +36,7 @@ return {
 			return sn(nil, {
 				t(
 					vim.split(
-						vim.api.nvim_exec("echo " .. vimstring, true),
+						vim.api.nvim_exec(vimstring, true),
 						"\n"
 					)
 				),
