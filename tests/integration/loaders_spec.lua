@@ -4,91 +4,8 @@ local ls_helpers = require("helpers")
 local Screen = require("test.functional.ui.screen")
 local assert = require("luassert")
 
-local loaders = {
-	["vscode(rtp)"] = function()
-		exec(
-			"set rtp+="
-				.. os.getenv("LUASNIP_SOURCE")
-				.. "/tests/data/vscode-snippets"
-		)
-		exec_lua('require("luasnip.loaders.from_vscode").load()')
-	end,
-	["vscode(path)"] = function()
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_vscode").load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE") .. "/tests/data/vscode-snippets"
-			)
-		)
-	end,
-	["vscode(lazy)"] = function()
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_vscode").lazy_load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE") .. "/tests/data/vscode-snippets"
-			)
-		)
-	end,
-
-	["snipmate(rtp)"] = function()
-		exec(
-			"set rtp+="
-				.. os.getenv("LUASNIP_SOURCE")
-				.. "/tests/data/snipmate-snippets"
-		)
-		exec_lua('require("luasnip.loaders.from_snipmate").load()')
-	end,
-	["snipmate(path)"] = function(dir)
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_snipmate").load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE")
-					.. "/tests/data/snipmate-snippets/"
-					.. dir
-			)
-		)
-	end,
-	["snipmate(lazy)"] = function(dir)
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_snipmate").lazy_load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE")
-					.. "/tests/data/snipmate-snippets/"
-					.. dir
-			)
-		)
-	end,
-
-	["lua(rtp)"] = function()
-		exec(
-			"set rtp+="
-				.. os.getenv("LUASNIP_SOURCE")
-				.. "/tests/data/lua-snippets"
-		)
-		exec_lua('require("luasnip.loaders.from_lua").load()')
-	end,
-	["lua(path)"] = function()
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_lua").load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE")
-					.. "/tests/data/lua-snippets/luasnippets"
-			)
-		)
-	end,
-	["lua(lazy)"] = function()
-		exec_lua(
-			string.format(
-				[[require("luasnip.loaders.from_lua").lazy_load({paths="%s"})]],
-				os.getenv("LUASNIP_SOURCE")
-					.. "/tests/data/lua-snippets/luasnippets"
-			)
-		)
-	end,
-}
-
 local function for_all_loaders(message, fn)
-	for name, load in pairs(loaders) do
+	for name, load in pairs(ls_helpers.loaders) do
 		it(name .. " " .. message, function()
 			-- needed for snipmate-loader.
 			load("snippets")
@@ -104,7 +21,7 @@ describe("loaders:", function()
 
 	before_each(function()
 		helpers.clear()
-		ls_helpers.session_setup_luasnip()
+		ls_helpers.session_setup_luasnip({ no_snip_globals = true })
 
 		screen = Screen.new(50, 5)
 		screen:attach()
@@ -188,9 +105,9 @@ describe("loaders:", function()
 	end)
 
 	it("Can lazy-load from multiple sources", function()
-		loaders["snipmate(lazy)"]("snippets")
-		loaders["vscode(lazy)"]()
-		loaders["lua(lazy)"]()
+		ls_helpers.loaders["snipmate(lazy)"]("snippets")
+		ls_helpers.loaders["vscode(lazy)"]()
+		ls_helpers.loaders["lua(lazy)"]()
 		-- triggers actual load for `lazy_load()`s'
 		exec("set ft=lua")
 		-- wait a bit for async-operations to finish
@@ -200,8 +117,8 @@ describe("loaders:", function()
 	end)
 
 	it("Can lazy-load from multiple snipmate-collections.", function()
-		loaders["snipmate(lazy)"]("snippets")
-		loaders["snipmate(lazy)"]("snippets1")
+		ls_helpers.loaders["snipmate(lazy)"]("snippets")
+		ls_helpers.loaders["snipmate(lazy)"]("snippets1")
 		exec("set ft=lua")
 		-- triggers actual load for `lazy_load()`s'
 		-- wait a bit for async-operations to finish
@@ -211,7 +128,7 @@ describe("loaders:", function()
 	end)
 
 	it("Can load with extends (snipmate)", function()
-		loaders["snipmate(lazy)"]("snippets")
+		ls_helpers.loaders["snipmate(lazy)"]("snippets")
 		-- triggers actual load for `lazy_load()`s'
 		exec("set ft=vim")
 		-- wait a bit for async-operations to finish
@@ -234,6 +151,27 @@ describe("loaders:", function()
 		)
 
 		assert.are.same(3, exec_lua('return #ls.get_snippets("vim")'))
+	end)
+
+	it("loads paths with invalid paths ditched (vscode)", function()
+		exec_lua(string.format(
+			[[require("luasnip.loaders.from_vscode").load({paths={"%s", "%s"}})]],
+			os.getenv("LUASNIP_SOURCE") .. "/tests/data/invalid-not-exists",
+			os.getenv("LUASNIP_SOURCE") .. "/tests/data/vscode-snippets" -- has 5 prio snippets
+		))
+
+		assert.are.same(5, exec_lua('return #ls.get_snippets("prio")'))
+	end)
+
+	it("loads paths with invalid paths ditched (lua)", function()
+		exec_lua(string.format(
+			[[require("luasnip.loaders.from_lua").load({paths={"%s", "%s"}})]],
+			os.getenv("LUASNIP_SOURCE") .. "/tests/data/invalid-not-exists",
+			os.getenv("LUASNIP_SOURCE")
+				.. "/tests/data/lua-snippets/luasnippets" -- has 1 prio snippet
+		))
+
+		assert.are.same(1, exec_lua('return #ls.get_snippets("prio")'))
 	end)
 
 	it("respects {override,default}_priority", function()
@@ -350,7 +288,7 @@ describe("loaders:", function()
 	end)
 
 	it("vscode-options work.", function()
-		loaders["vscode(rtp)"]()
+		ls_helpers.loaders["vscode(rtp)"]()
 		exec("set ft=prio")
 
 		feed("ibbbb")
@@ -385,7 +323,7 @@ describe("loaders:", function()
 	end)
 
 	it("snipmate-options work.", function()
-		loaders["snipmate(rtp)"]()
+		ls_helpers.loaders["snipmate(rtp)"]()
 		exec("set ft=prio")
 
 		feed("ibbbb")
@@ -422,23 +360,44 @@ describe("loaders:", function()
 		})
 	end)
 
+	it("Can load jsonc.", function()
+		ls_helpers.loaders["vscode(rtp)"]()
+
+		feed("ijsonc")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			jsonc!!!^                                          |
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+	end)
+
 	reload_test(
 		"snipmate-reload works",
-		loaders["snipmate(rtp)"],
+		ls_helpers.loaders["snipmate(rtp)"],
 		"/tests/data/snipmate-snippets/snippets/all.snippets",
 		"<Esc>2jwcereplaces<Esc>:w<Cr><C-O>ccall1"
 	)
 
 	reload_test(
 		"vscode-reload works",
-		loaders["vscode(rtp)"],
+		ls_helpers.loaders["vscode(rtp)"],
 		"/tests/data/vscode-snippets/snippets/all.json",
 		"<Esc>4jwlcereplaces<Esc>:w<Cr><C-O>ccall1"
+	)
+	reload_test(
+		"vscode-standalone-reload works",
+		ls_helpers.loaders["vscode(standalone)"],
+		"/tests/data/vscode-standalone.code-snippets",
+		"<Esc>11jwlcereplaces<Esc>:w<Cr><C-O>ccall1"
 	)
 
 	reload_test(
 		"lua-reload works",
-		loaders["lua(rtp)"],
+		ls_helpers.loaders["lua(rtp)"],
 		"/tests/data/lua-snippets/luasnippets/all.lua",
 		"<Esc>jfecereplaces<Esc>:w<Cr><C-O>ccall1"
 	)
@@ -531,4 +490,70 @@ describe("loaders:", function()
 		"/tests/symlinked_data/lua-snippets/luasnippets/all.lua",
 		"<Esc>jfecereplaces<Esc>:w<Cr><C-O>ccall1"
 	)
+
+	it("Can load files with `code-snippets`-extension.", function()
+		ls_helpers.loaders["vscode(rtp)"]()
+
+		feed("icodesnippets")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			code-snippets!!!^                                  |
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+	end)
+
+	it("Respects `scope` (vscode)", function()
+		ls_helpers.loaders["vscode(rtp)"]()
+
+		feed("icc")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			cc^                                                |
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		exec("set ft=c")
+		feed("<Cr>cc")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			cc                                                |
+			3^                                                 |
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		-- check if invalidation affects the duplicated snippet.
+		exec_lua([[ls.get_snippets("c")[1]:invalidate()]])
+		feed("<Cr>cc")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			cc                                                |
+			3                                                 |
+			cc^                                                |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		exec("set ft=cpp")
+		feed("<Cr>cc")
+		exec_lua("ls.expand()")
+		screen:expect({
+			grid = [[
+			cc                                                |
+			3                                                 |
+			cc                                                |
+			3^                                                 |
+			{2:-- INSERT --}                                      |]],
+		})
+	end)
 end)

@@ -8,6 +8,7 @@ describe("snippets_basic", function()
 
 	before_each(function()
 		helpers.clear()
+		ls_helpers.setup_jsregexp()
 		ls_helpers.session_setup_luasnip()
 
 		screen = Screen.new(50, 3)
@@ -513,6 +514,676 @@ describe("snippets_basic", function()
 		screen:expect({
 			grid = [[
 			woah :o^                                           |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+	end)
+
+	it("snip_env respects behaviour (set)", function()
+		exec_lua([[
+			ls.setup({
+				snip_env = {
+					__snip_env_behaviour = "set",
+					_s = true
+				}
+			})
+			-- remove this variable from global environment.
+			s = nil
+		]])
+		exec_lua(
+			string.format(
+				[[require("luasnip.loaders.from_lua").load({paths="%s"})]],
+				os.getenv("LUASNIP_SOURCE")
+					.. "/tests/data/lua-snippets/luasnippets2_env_test_set"
+			)
+		)
+	end)
+	it("snip_env respects behaviour (extend)", function()
+		exec_lua([[
+			ls.setup({
+				snip_env = {
+					__snip_env_behaviour = "extend",
+					_s = true,
+					-- default has i as function, check override.
+					i = true
+				}
+			})
+			-- remove this variable from global environment.
+			s = nil
+		]])
+		exec_lua(
+			string.format(
+				[[require("luasnip.loaders.from_lua").load({paths="%s"})]],
+				os.getenv("LUASNIP_SOURCE")
+					.. "/tests/data/lua-snippets/luasnippets2_env_test_extend"
+			)
+		)
+	end)
+
+	it("autocommands are triggered by events", function()
+		assert.is_true(exec_lua([[
+			vim.api.nvim_create_autocmd("User", {
+				pattern = "LuasnipInsertNodeEnter",
+				callback = function()
+					inode_did_enter = true
+				end
+			})
+			ls.snip_expand(
+				s("trig", {
+					t"text", i(1), t"text again", i(2), t"and again"
+				}) )
+			return inode_did_enter
+		]]))
+	end)
+
+	it("{region,delete}_check_events works correctly", function()
+		exec_lua([[
+			ls.setup({
+				history = true,
+				region_check_events = {"CursorHold", "InsertLeave"},
+				delete_check_events = "TextChanged,InsertEnter",
+			})
+
+			ls.snip_expand(s("a", {
+				t"sometext", i(1, "someinsertnode")
+			}))
+		]])
+		screen:expect({
+			grid = [[
+  sometext^s{3:omeinsertnode}                            |
+  {0:~                                                 }|
+  {2:-- SELECT --}                                      |
+]],
+		})
+		-- leave snippet-area, and trigger insertLeave.
+		feed("<Esc>o<Esc>")
+		screen:expect({
+			grid = [[
+  sometextsomeinsertnode                            |
+  ^                                                  |
+                                                    |
+]],
+		})
+		-- make sure we're in the last tabstop (ie. region_check_events did its
+		-- job).
+		exec_lua("ls.jump(1)")
+		screen:expect({
+			grid = [[
+  sometextsomeinsertnode                            |
+  ^                                                  |
+                                                    |
+]],
+		})
+		-- not really necessary, but feels safer this way.
+		exec_lua("ls.jump(-1)")
+		screen:expect({
+			grid = [[
+  sometext^s{3:omeinsertnode}                            |
+                                                    |
+  {2:-- SELECT --}                                      |
+]],
+		})
+
+		-- delete snippet text
+		feed("<Esc>dd")
+		-- make sure the snippet is no longer active.
+		assert.is_true(exec_lua([[
+			return ls.session.current_nodes[vim.api.nvim_get_current_buf()] == nil
+		]]))
+	end)
+
+	it("autocommands are registered in different formats", function()
+		local function test_combination(setting_name, overridefn_name)
+			exec_lua(([[
+					local config_events = {
+						{"InsertLeave","CursorHold"},
+						"InsertLeave,CursorHold",
+						"InsertLeave, CursorHold",
+						"InsertLeave",
+						{"InsertLeave"}
+					}
+					local check_events = {
+						{"InsertLeave","CursorHold"},
+						{"InsertLeave","CursorHold"},
+						{"InsertLeave","CursorHold"},
+						{"InsertLeave"},
+						{"InsertLeave"}
+					}
+
+					for i, config_event in ipairs(config_events) do
+						a_set = false
+						ls.%s = function() a_set = true end
+
+						ls.setup({
+							%s = config_event
+						})
+						for _, event in ipairs(check_events[i]) do
+							a_set = false
+							vim.api.nvim_exec_autocmds(event, {})
+							assert(a_set)
+						end
+					end
+				]]):format(overridefn_name, setting_name))
+		end
+
+		test_combination("region_check_events", "exit_out_of_region")
+		test_combination("delete_check_events", "unlink_current_if_deleted")
+		test_combination("update_events", "active_update_dependents")
+		test_combination("updateevents", "active_update_dependents")
+	end)
+
+	it(
+		"jump_destination works for snippets where `node.active` is important",
+		function()
+			exec_lua([[
+			ls.snip_expand(s("", {i(1), sn(2, {t"this is skipped"}), i(3)}))
+		]])
+			assert.are.same(
+				exec_lua(
+					[[return ls.jump_destination(1).absolute_insert_position]]
+				),
+				{ 3 }
+			)
+		end
+	)
+
+	it(
+		"wordTrig, regTrig, hidden, name, description, docstring work and default correctly",
+		function()
+			local snip_wt_val = {
+				{
+					[[ s({trig="a", wordTrig = false}, { t"justsometext" }) ]],
+					"wordTrig",
+					"false",
+				},
+				{
+					[[ s({trig="a", wordTrig = true}, { t"justsometext" }) ]],
+					"wordTrig",
+					"true",
+				},
+				{
+					[[ s({trig="a"}, { t"justsometext" }) ]],
+					"wordTrig",
+					"true",
+				},
+
+				{
+					[[ s({trig="a", regTrig = false}, { t"justsometext" }) ]],
+					"regTrig",
+					"false",
+				},
+				{
+					[[ s({trig="a", regTrig = true}, { t"justsometext" }) ]],
+					"regTrig",
+					"true",
+				},
+				{
+					[[ s({trig="a"}, { t"justsometext" }) ]],
+					"regTrig",
+					"false",
+				},
+
+				{
+					[[ s({trig="a", hidden = false}, { t"justsometext" }) ]],
+					"hidden",
+					"false",
+				},
+				{
+					[[ s({trig="a", hidden = true}, { t"justsometext" }) ]],
+					"hidden",
+					"true",
+				},
+				{ [[ s({trig="a"}, { t"justsometext" }) ]], "hidden", "false" },
+
+				{
+					[[ s({trig="a", name = "thename"}, { t"justsometext" }) ]],
+					"name",
+					[["thename"]],
+				},
+				{ [[ s({trig="a"}, { t"justsometext" }) ]], "name", [["a"]] },
+
+				{
+					[[ s({trig="a", dscr = "thedescription"}, { t"justsometext" }) ]],
+					"dscr",
+					[[{"thedescription"}]],
+				},
+				{ [[ s({trig="a"}, { t"justsometext" }) ]], "dscr", [[{"a"}]] },
+
+				{
+					[[ s({trig="a", docstring = "thedocstring"}, { t"justsometext" }) ]],
+					"docstring",
+					[[{"thedocstring"}]],
+				},
+				{
+					[[ s({trig="a"}, { t"justsometext" }) ]],
+					"docstring",
+					"nil",
+				},
+			}
+
+			for _, pair in ipairs(snip_wt_val) do
+				assert.is_true(exec_lua(([[
+				local snip = %s
+				return vim.deep_equal(snip.%s, %s)
+			]]):format(pair[1], pair[2], pair[3])))
+			end
+		end
+	)
+
+	it("LuaSnipListAvailable works", function()
+		helpers.clear()
+		ls_helpers.session_setup_luasnip()
+
+		screen = Screen.new(50, 40)
+		screen:attach()
+		screen:set_default_attr_ids({
+			[0] = { bold = true, foreground = Screen.colors.Blue1 },
+			[1] = { bold = true, foreground = Screen.colors.Brown },
+			[2] = { bold = true },
+			[3] = { background = Screen.colors.LightGrey },
+			[4] = { bold = true, reverse = true },
+			[5] = { bold = true, foreground = Screen.colors.SeaGreen4 },
+			[6] = { foreground = Screen.colors.Red1 },
+		})
+		exec_lua([[
+			ls.add_snippets("all", {
+				s({trig="a"}, { t"justsometexta" }),
+				s({trig="b"}, { t"justsometextb" }),
+				s({trig="c"}, { t"justsometextc" }),
+			})
+		]])
+		feed(":LuaSnipListAvailable<Cr>")
+		screen:expect({
+			grid = [[
+			                                                  |
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{0:~                                                 }|
+			{4:                                                  }|
+			{                                                 |
+			  [""] = {},                                      |
+			  all = { {                                       |
+			      description = { "a" },                      |
+			      name = "a",                                 |
+			      regTrig = false,                            |
+			      trigger = "a",                              |
+			      wordTrig = true                             |
+			    }, {                                          |
+			      description = { "b" },                      |
+			      name = "b",                                 |
+			      regTrig = false,                            |
+			      trigger = "b",                              |
+			      wordTrig = true                             |
+			    }, {                                          |
+			      description = { "c" },                      |
+			      name = "c",                                 |
+			      regTrig = false,                            |
+			      trigger = "c",                              |
+			      wordTrig = true                             |
+			    } }                                           |
+			}                                                 |
+			{5:Press ENTER or type command to continue}^           |]],
+		})
+		feed("<Cr>")
+	end)
+
+	it("get_keyed_node works", function()
+		exec_lua([[
+			ls.snip_expand(s("", {
+				i(1, "a", {key = "a"}),
+				c(2, {
+					{t"asdf", i(1, "b", {key = "b"})},
+					d(nil, function()
+						return sn(nil, {i(1, "c", {key = "c"})})
+					end, {})
+				})
+			}))
+		]])
+		exec_lua("snip = ls.session.current_nodes[1].parent.snippet")
+		assert.are.same(
+			{ "a" },
+			exec_lua([[return snip:get_keyed_node("a"):get_text()]])
+		)
+		assert.are.same(
+			{ "b" },
+			exec_lua([[return snip:get_keyed_node("b"):get_text()]])
+		)
+		assert.are.same(
+			exec_lua([[return vim.NIL]]),
+			exec_lua([[return snip:get_keyed_node("c")]])
+		)
+
+		exec_lua("ls.jump(1) ls.change_choice(1)")
+
+		assert.are.same(
+			{ "c" },
+			exec_lua([[return snip:get_keyed_node("c"):get_text()]])
+		)
+	end)
+
+	it("text is inserted into the selected node.", function()
+		exec_lua([[
+			ls.snip_expand(s("", {
+				i(1), i(2), sn(3, {
+					i(2), i(1)
+				}), i(4)
+			}))
+		]])
+
+		feed("aa")
+		screen:expect({
+			grid = [[
+			aa^                                                |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua("ls.jump(1)")
+
+		-- will insert here later.
+		exec_lua("ls.jump(1)")
+
+		feed("cc")
+		screen:expect({
+			grid = [[
+			aacc^                                              |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua("ls.jump(1)")
+
+		feed("dd")
+		screen:expect({
+			grid = [[
+			aadd^cc                                            |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua("ls.jump(1)")
+
+		feed("ee")
+		screen:expect({
+			grid = [[
+			aaddccee^                                          |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		exec_lua("ls.jump(-1)")
+		screen:expect({
+			grid = [[
+			aa^d{3:d}ccee                                          |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+		exec_lua("ls.jump(-1)")
+		screen:expect({
+			grid = [[
+			aadd^c{3:c}ee                                          |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+		exec_lua("ls.jump(-1)")
+		feed("bb")
+		screen:expect({
+			grid = [[
+			aabb^ddccee                                        |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua("ls.jump(-1)")
+		screen:expect({
+			grid = [[
+			^a{3:a}bbddccee                                        |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+		exec_lua("ls.jump(1)")
+		screen:expect({
+			grid = [[
+			aa^b{3:b}ddccee                                        |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+	end)
+
+	it(
+		"text is inserted into the selected node, when dynamicNode is present",
+		function()
+			exec_lua([[
+			ls.snip_expand(s("", {
+				i(4), i(1), d(2, function()
+					return sn(nil, {i(2), i(1)})
+				end, {3}), i(3, "text??")
+			}))
+		]])
+			screen:expect({
+				grid = [[
+			^text??                                            |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+
+			exec_lua("ls.jump(1) ls.jump(1) ls.jump(1)")
+			feed("refresh dNode ")
+			screen:expect({
+				grid = [[
+			refresh dNode ^                                    |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			^refresh dNode                                     |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+			feed("shifts dNode?")
+			screen:expect({
+				grid = [[
+			shifts dNode?^refresh dNode                        |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+			-- doing all jump in the same exec_lua fails :/
+			-- Maybe some weird timing-issue with feed..
+			exec_lua("ls.jump(-1)")
+			exec_lua("ls.jump(-1)")
+			exec_lua("ls.jump(-1)")
+			exec_lua("ls.jump(-1)")
+			feed(" also shifts dNode ")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode ^refresh dNode      |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			feed(" dNode1 ")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode dNode1 ^refresh dNod|
+			e                                                 |
+			{2:-- INSERT --}                                      |]],
+			})
+
+			exec_lua("ls.jump(1)")
+			feed(" dNode2 ")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode dNode2 ^dNode1 refre|
+			sh dNode                                          |
+			{2:-- INSERT --}                                      |]],
+			})
+
+			exec_lua("ls.jump(-1)")
+			exec_lua("ls.jump(-1)")
+			screen:expect({
+				grid = [[
+			shifts dNode?^a{3:lso shifts dNode }dNode2 dNode1 refre|
+			sh dNode                                          |
+			{2:-- SELECT --}                                      |]],
+			})
+
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode dNode2 ^d{3:Node1 }refre|
+			sh dNode                                          |
+			{2:-- SELECT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode ^d{3:Node2 }dNode1 refre|
+			sh dNode                                          |
+			{2:-- SELECT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode dNode2 dNode1 ^r{3:efre}|
+			{3:sh dNode }                                         |
+			{2:-- SELECT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			^s{3:hifts dNode?}also shifts dNode dNode2 dNode1 refre|
+			sh dNode                                          |
+			{2:-- SELECT --}                                      |]],
+			})
+			exec_lua("ls.jump(1)")
+			screen:expect({
+				grid = [[
+			shifts dNode?also shifts dNode dNode2 dNode1 refre|
+			sh dNode ^                                         |
+			{2:-- INSERT --}                                      |]],
+			})
+		end
+	)
+	it(
+		"text is inserted into the selected node, when choiceNode is present",
+		function()
+			exec_lua([[
+			ls.snip_expand(s("", {
+				i(1),
+				c(2, {
+					t"asdf",
+					i(nil)
+				}),
+				i(3, "text??")
+			}))
+		]])
+			screen:expect({
+				grid = [[
+			^asdftext??                                        |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+
+			-- jump to i3
+			exec_lua("ls.jump(1) ls.jump(1)")
+			feed("1111")
+			screen:expect({
+				grid = [[
+			asdf1111^                                          |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+
+			-- change choice, jump back
+			exec_lua("ls.jump(-1) ls.change_choice(1) ls.jump(1)")
+			feed("2222")
+			screen:expect({
+				grid = [[
+			2222^                                              |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+
+			-- back to i1
+			exec_lua("ls.jump(-1) ls.jump(-1)")
+			feed("3333")
+			screen:expect({
+				grid = [[
+			3333^2222                                          |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+
+			exec_lua("ls.jump(1)")
+			feed("4444")
+			screen:expect({
+				grid = [[
+			33334444^2222                                      |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+			})
+		end
+	)
+
+	local engine_data = {
+		-- list of: trigger, snippet-body, docTrig/inserted text, expected expansion, expected docstring
+		vim = [[\(\d\+\)]],
+		pattern = [[(%d+)]],
+		ecma = [[(\d+)]],
+	}
+	for engine, trig in pairs(engine_data) do
+		it('trigEngine "' .. engine .. '" works', function()
+			exec_lua(
+				[[
+				trigEngine, trig, body, doctrig = ...
+				snip = s({trig = trig, docTrig = "3", trigEngine = trigEngine}, {t"c1: ", l(l.CAPTURE1)})
+				ls.add_snippets("all", {snip})
+			]],
+				engine,
+				trig
+			)
+			feed("i<Space>3")
+			exec_lua("ls.expand()")
+			screen:expect({
+				grid = [[
+				 c1: 3^                                            |
+				{0:~                                                 }|
+				{2:-- INSERT --}                                      |]],
+			})
+			-- make sure docTrig works with all engines.
+			assert.is_true(
+				exec_lua([[return snip:get_docstring()[1] == "c1: 3$0"]])
+			)
+		end)
+	end
+
+	it("custom trigEngine works", function()
+		exec_lua([[
+			ls.add_snippets("all", {
+				s({trig = "", trigEngine = function(trigger)
+					return function(line_to_cursor, trigger)
+						if line_to_cursor:match("asdf") then
+							return "asdf", {}
+						end
+					end
+				end}, {t"aaaaa"})
+			})
+		]])
+		feed("iasdf")
+		exec_lua([[ ls.expand() ]])
+		screen:expect({
+			grid = [[
+			aaaaa^                                             |
 			{0:~                                                 }|
 			{2:-- INSERT --}                                      |]],
 		})

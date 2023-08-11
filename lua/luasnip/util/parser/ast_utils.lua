@@ -1,12 +1,9 @@
 local Ast = require("luasnip.util.parser.neovim_ast")
 local types = Ast.node_type
 local util = require("luasnip.util.util")
-
--- jsregexp: first try loading the version installed by luasnip, then global ones.
-local jsregexp_ok, jsregexp = pcall(require, "luasnip-jsregexp")
-if not jsregexp_ok then
-	jsregexp_ok, jsregexp = pcall(require, "jsregexp")
-end
+local Str = require("luasnip.util.str")
+local log = require("luasnip.util.log").new("parser")
+local jsregexp = require("luasnip.util.util").jsregexp
 
 local directed_graph = require("luasnip.util.directed_graph")
 
@@ -171,45 +168,6 @@ local function replace_position(ast, p1, p2)
 	end)
 end
 
-local is_interactive
-local has_interactive_children = function(node, root)
-	-- make sure all children are not interactive
-	for _, child in ipairs(node.children) do
-		if is_interactive(child, root) then
-			return false
-		end
-	end
-	return true
-end
-local type_is_interactive = {
-	[types.SNIPPET] = has_interactive_children,
-	[types.TEXT] = util.no,
-	[types.TABSTOP] = function(node, root)
-		local tabstop_is_copy = false
-		predicate_ltr_nodes(root, function(pred_node)
-			-- stop at this tabstop
-			if pred_node == node then
-				return true
-			end
-			-- stop if match found
-			if pred_node.tabstop == node.tabstop then
-				tabstop_is_copy = true
-				return true
-			end
-			-- otherwise, continue.
-			return false
-		end)
-		-- this tabstop is interactive if it is not a copy.
-		return not tabstop_is_copy
-	end,
-	[types.PLACEHOLDER] = has_interactive_children,
-	[types.VARIABLE] = util.no,
-	[types.CHOICE] = util.yes,
-}
-local function is_interactive(node, snippet)
-	return type_is_interactive[node.type](node, snippet)
-end
-
 function M.fix_zero(ast)
 	local zn, ast_child_with_0_indx, is_copied = real_zero_node(ast)
 	-- if zn exists, is a tabstop, an immediate child of `ast`, and does not
@@ -300,22 +258,20 @@ function M.add_dependents(ast)
 	end
 end
 
-local modifiers = setmetatable({
-	upcase = string.upper,
-	downcase = string.lower,
-	capitalize = function(string)
-		-- uppercase first character only.
-		return string:sub(1, 1):upper() .. string:sub(2, -1)
-	end,
-}, {
-	__index = function()
-		-- return string unmodified.
-		-- TODO: log an error/warning here.
-		return util.id
-	end,
-})
 local function apply_modifier(text, modifier)
-	return modifiers[modifier](text)
+	local mod_fn = Str.vscode_string_modifiers[modifier]
+	if mod_fn then
+		return mod_fn(text)
+	else
+		-- this can't really be reached, since only correct and available
+		-- modifiers are parsed successfully
+		-- (https://github.com/L3MON4D3/LuaSnip/blob/5fbebf6409f86bc4b7b699c2c80745e1ed190c16/lua/luasnip/util/parser/neovim_parser.lua#L239-L245).
+		log.warn(
+			"Tried to apply unknown modifier `%s` while parsing snippet, recovering by applying identity instead.",
+			modifier
+		)
+		return text
+	end
 end
 
 local function apply_transform_format(nodes, captures)
@@ -347,7 +303,7 @@ local function apply_transform_format(nodes, captures)
 end
 
 function M.apply_transform(transform)
-	if jsregexp_ok then
+	if jsregexp then
 		local reg_compiled =
 			jsregexp.compile(transform.pattern, transform.option)
 		-- can be passed to functionNode!
@@ -359,8 +315,8 @@ function M.apply_transform(transform)
 			local transformed = ""
 			-- index one past the end of previous match.
 			-- This is used to append unmatched characters to `transformed`, so
-			-- it's initialized with 1.
-			local prev_match_end = 1
+			-- it's initialized such that the first append is from 1.
+			local prev_match_end = 0
 			for _, match in ipairs(matches) do
 				-- begin_ind and end_ind are inclusive.
 				transformed = transformed

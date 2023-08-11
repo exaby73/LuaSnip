@@ -17,6 +17,11 @@ local condition_mt = {
 			return o1(...) or o2(...)
 		end)
 	end,
+	__sub = function(o1, o2)
+		return M.make_condition(function(...)
+			return o1(...) and not o2(...)
+		end)
+	end,
 	-- and '*'
 	__mul = function(o1, o2)
 		return M.make_condition(function(...)
@@ -42,6 +47,7 @@ local condition_mt = {
 		return tab.func(line_to_cursor, matched_trigger, captures)
 	end,
 }
+
 function M.make_condition(func)
 	return setmetatable({ func = func }, condition_mt)
 end

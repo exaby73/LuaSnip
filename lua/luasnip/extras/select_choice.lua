@@ -1,5 +1,4 @@
 local session = require("luasnip.session")
-local util = require("luasnip.util.util")
 local ls = require("luasnip")
 
 local function set_choice_callback(_, indx)
@@ -12,7 +11,10 @@ local function set_choice_callback(_, indx)
 end
 
 local function select_choice()
-	assert(session.active_choice_node, "No active choiceNode")
+	assert(
+		session.active_choice_nodes[vim.api.nvim_get_current_buf()],
+		"No active choiceNode"
+	)
 	vim.ui.select(
 		ls.get_current_choices(),
 		{ kind = "luasnip" },

@@ -3,9 +3,9 @@ local FunctionNode = Node:new()
 local util = require("luasnip.util.util")
 local node_util = require("luasnip.nodes.util")
 local types = require("luasnip.util.types")
-local events = require("luasnip.util.events")
 local tNode = require("luasnip.nodes.textNode").textNode
 local extend_decorator = require("luasnip.util.extend_decorator")
+local key_indexer = require("luasnip.nodes.key_indexer")
 
 local function F(fn, args, opts)
 	opts = opts or {}
@@ -48,8 +48,10 @@ function FunctionNode:update()
 	if vim.bo.expandtab then
 		util.expand_tabs(text, util.tab_width(), #self.parent.indentstr)
 	end
+
 	-- don't expand tabs in parent.indentstr, use it as-is.
-	self.parent:set_text(self, util.indent(text, self.parent.indentstr))
+	self:set_text(util.indent(text, self.parent.indentstr))
+	self:update_dependents()
 end
 
 local update_errorstring = [[
@@ -88,13 +90,13 @@ end
 function FunctionNode:update_restore()
 	-- only if args still match.
 	if self.static_text and vim.deep_equal(self:get_args(), self.last_args) then
-		self.parent:set_text(self, self.static_text)
+		self:set_text(self.static_text)
 	else
 		self:update()
 	end
 end
 
--- FunctionNode's don't have static text, nop these.
+-- FunctionNode's don't have static text, only set visibility.
 function FunctionNode:put_initial(_)
 	self.visible = true
 end
@@ -122,7 +124,7 @@ function FunctionNode:set_dependents()
 		if rawget(arg, "type") ~= nil then
 			dict:set(vim.list_extend({ arg }, append_list), self)
 		elseif arg.absolute_insert_position then
-			-- copy, list_extend mutates.
+			-- copy absolute_insert_position, list_extend mutates.
 			dict:set(
 				vim.list_extend(
 					vim.deepcopy(arg.absolute_insert_position),
@@ -130,6 +132,8 @@ function FunctionNode:set_dependents()
 				),
 				self
 			)
+		elseif key_indexer.is_key(arg) then
+			dict:set(vim.list_extend({ "key", arg.key }, append_list), self)
 		end
 	end
 end

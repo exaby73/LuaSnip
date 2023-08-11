@@ -1,9 +1,11 @@
 local session = require("luasnip.session")
 local util = require("luasnip.util.util")
-local types = require("luasnip.util.types")
+local node_util = require("luasnip.util.util")
 local node_util = require("luasnip.nodes.util")
 local ext_util = require("luasnip.util.ext_opts")
 local events = require("luasnip.util.events")
+local key_indexer = require("luasnip.nodes.key_indexer")
+local types = require("luasnip.util.types")
 
 local Node = {}
 
@@ -45,7 +47,10 @@ function Node:get_static_text()
 	-- })
 	--
 	-- )
-	if not self.static_visible then
+	-- By also allowing visible, and not only static_visible, the docstrings
+	-- generated during `get_current_choices` (ie. without having the whole
+	-- snippet `static_init`ed) get better.
+	if not self.visible and not self.static_visible then
 		return nil
 	end
 	return self.static_text
@@ -65,29 +70,50 @@ function Node:put_initial(pos)
 	self.visible = true
 end
 
-function Node:input_enter(_)
+function Node:input_enter(_, _)
 	self.visited = true
 	self.mark:update_opts(self.ext_opts.active)
 
 	self:event(events.enter)
 end
 
-function Node:jump_into(_, no_move)
-	self:input_enter(no_move)
+-- dry_run: if not nil, it has to be a table with the key `active` also a table.
+-- dry_run.active[node] stores whether the node is "active" in the dry run (we
+-- can't change the `active`-state in the actual node, so changes to the
+-- active-state are stored in the `dry_run`-table, which is passed to all nodes
+-- that participate in the jump)
+-- The changes to `active` have to be stored. Otherwise, `dry_run` can lead to
+-- endless loops in cases like:
+-- ```lua
+-- s({ trig = 'n' } , { i(1, "1"), sn(2, {t"asdf"}), i(3, "3") })
+-- ```
+--
+-- Here, jumping from 1 will first set active on the snippetNode, then, since
+-- there are no interactive nodes inside it, and since active is set, we will
+-- jump to the `i(3)`.
+-- If active is not set during the dry_run, we will just keep jumping into the
+-- inner textNode.
+--
+-- A similar problem occurs in nested expansions (insertNode.inner_active
+-- is not set).
+function Node:jump_into(_, no_move, dry_run)
+	if not dry_run then
+		self:input_enter(no_move, dry_run)
+	end
 	return self
 end
 
-function Node:jump_from(dir, no_move)
-	self:input_leave()
+function Node:jump_from(dir, no_move, dry_run)
+	self:input_leave(no_move, dry_run)
 	if dir == 1 then
 		if self.next then
-			return self.next:jump_into(dir, no_move)
+			return self.next:jump_into(dir, no_move, dry_run)
 		else
 			return nil
 		end
 	else
 		if self.prev then
-			return self.prev:jump_into(dir, no_move)
+			return self.prev:jump_into(dir, no_move, dry_run)
 		else
 			return nil
 		end
@@ -100,10 +126,6 @@ function Node:jumpable(dir)
 	else
 		return self.prev ~= nil
 	end
-end
-
-function Node:set_mark_rgrav(rgrav_beg, rgrav_end)
-	self.mark:update_rgravs(rgrav_beg, rgrav_end)
 end
 
 function Node:get_text()
@@ -148,7 +170,10 @@ function Node:get_passive_ext_opts()
 	end
 end
 
-function Node:input_leave()
+function Node:input_leave(_, dry_run)
+	if dry_run then
+		return
+	end
 	self:event(events.leave)
 
 	self.mark:update_opts(self:get_passive_ext_opts())
@@ -157,14 +182,25 @@ end
 local function find_dependents(self, position_self, dict)
 	local nodes = {}
 
-	position_self[#position_self + 1] = "dependents"
-	vim.list_extend(nodes, dict:find_all(position_self, "dependent") or {})
-	position_self[#position_self] = nil
+	-- this might also be called from a node which does not possess a position!
+	-- (for example, a functionNode may be depended upon via its key)
+	if position_self then
+		position_self[#position_self + 1] = "dependents"
+		vim.list_extend(nodes, dict:find_all(position_self, "dependent") or {})
+		position_self[#position_self] = nil
+	end
 
 	vim.list_extend(
 		nodes,
 		dict:find_all({ self, "dependents" }, "dependent") or {}
 	)
+
+	if self.key then
+		vim.list_extend(
+			nodes,
+			dict:find_all({ "key", self.key, "dependents" }, "dependent") or {}
+		)
+	end
 
 	return nodes
 end
@@ -251,45 +287,54 @@ function Node:event(event)
 	end
 
 	session.event_node = self
-	vim.cmd(
-		"doautocmd <nomodeline> User Luasnip"
-			.. events.to_string(self.type, event)
-	)
+	vim.api.nvim_exec_autocmds("User", {
+		pattern = "Luasnip" .. events.to_string(self.type, event),
+		modeline = false,
+	})
 end
 
 local function get_args(node, get_text_func_name)
-	local args = {}
-
-	-- Insp(node.parent.snippet.dependents_dict)
-	for _, arg in pairs(node.args_absolute) do
-		-- since arg may be a node, it may not be initialized in the snippet
-		-- and therefore not have an absolute_insert_position. Check for that.
-		if not arg.absolute_insert_position then
-			-- the node is not (yet, maybe) visible.
-			return nil
+	local argnodes_text = {}
+	for _, arg in ipairs(node.args_absolute) do
+		local argnode
+		if key_indexer.is_key(arg) then
+			argnode = node.parent.snippet.dependents_dict:get({
+				"key",
+				arg.key,
+				"node",
+			})
+		else
+			-- since arg may be a node, it may not be initialized in the snippet
+			-- and therefore not have an absolute_insert_position. Check for that.
+			if not arg.absolute_insert_position then
+				-- the node is not (yet, maybe) visible.
+				return nil
+			end
+			local dict_key = arg.absolute_insert_position
+			-- will append to arg.absolute_insert_position, but it's restored
+			-- two lines down.
+			-- (dict:get shouldn't (yeah yeah, you never know, but this really
+			-- shouldn't) fail, so we don't worry with pcall)
+			table.insert(dict_key, "node")
+			argnode = node.parent.snippet.dependents_dict:get(dict_key)
+			dict_key[#dict_key] = nil
 		end
-		local arg_table = node.parent.snippet.dependents_dict:get(
-			arg.absolute_insert_position
-		)
-		if not arg_table then
-			return nil
-		end
-		local arg_node = arg_table.node
 		-- maybe the node is part of a dynamicNode and not yet generated.
-		if not arg_node then
+		if not argnode then
 			return nil
 		end
-		local argnode_text = arg_node[get_text_func_name](arg_node)
+
+		local argnode_text = argnode[get_text_func_name](argnode)
 		-- can only occur with `get_text`. If one returns nil, the argnode
 		-- isn't visible or some other error occured. Either way, return nil
 		-- to signify that not all argnodes are available.
 		if not argnode_text then
 			return nil
 		end
-		args[#args + 1] = arg_node[get_text_func_name](arg_node)
+		table.insert(argnodes_text, argnode_text)
 	end
 
-	return args
+	return argnodes_text
 end
 
 function Node:get_args()
@@ -341,6 +386,9 @@ function Node:set_argnodes(dict)
 		dict:set(self.absolute_insert_position, self)
 		self.absolute_insert_position[#self.absolute_insert_position] = nil
 	end
+	if self.key then
+		dict:set({ "key", self.key, "node" }, self)
+	end
 end
 
 function Node:make_args_absolute() end
@@ -384,6 +432,178 @@ function Node:is_interactive()
 	return true
 end
 
+-- initialize active-setting in dry_run-table for `self`.
+function Node:init_dry_run_active(dry_run)
+	if dry_run and dry_run.active[self] == nil then
+		dry_run.active[self] = self.active
+	end
+end
+-- determine whether this node is currently active.
+-- This is its own function (and not just a flat table-check) since we have to
+-- check the data in the dry_run-table or the node, depending on `dry_run`.
+function Node:is_active(dry_run)
+	return (not dry_run and self.active) or (dry_run and dry_run.active[self])
+end
+
+function Node:get_buf_position(opts)
+	opts = opts or {}
+	local raw = opts.raw ~= nil and opts.raw or true
+
+	if raw then
+		return self.mark:pos_begin_end_raw()
+	else
+		return self.mark:pos_begin_end()
+	end
+end
+
+-- when an insertNode receives text, its mark/region should contain all the
+-- text that is inserted.
+-- This can be achieved by setting the left and right "right-gravity"(rgrav) of
+-- the mark, which are responsible for controlling the direction an endpoint of
+-- the mark is moved when text is inserted.
+-- When a regular insertNode is focused/entered, we would like the left and
+-- right rgrav to be false and true, respectively. Example:
+--        this is an insertNodeAnd this is another insertNode
+-- mark1: l                    r
+-- mark2:                      l                     r
+-- if `this is an insertNode` should be focused, we have to set the rgrav of
+-- l1 false (because inserting text at the column of l1 should not shift l1 to
+-- the right). Similarly, the rgrav of r1 has to be set true, text inserted at
+-- its column SHOULD move it to the right.
+-- Complicating this whole thing: if like above there is an adjacent
+-- insertNode, its gravities have to be adjusted as well (if they are not, the
+-- insertNodes regions would overlap, which is obviously confusing). So, when
+-- adjusting some nodes rgravs, those of the siblings may have to be adjusted as well.
+-- Another example:
+--        aacc
+-- mark1: l r
+-- mark2:   l
+--          r
+-- mark3:   l r
+-- (the insertNode for mark2 is not visible at all, l2 and r2 are in the same
+-- column)
+-- This example highlights that not only the immediate sibling might need
+-- adjusting, but all siblings that share a mark-boundary with the node that
+-- should be focused.
+-- Even further complicating the matter: Snippets are trees, and failing to
+-- set the rgrav of snippet adjacent to (sharing an endpoint with) the node we
+-- want to focus, regardless of its position in the tree, will lead to extmarks
+-- covering the wrong regions.
+--
+-- More complications: focusing a node does not always mean setting the rgravs
+-- such that text will end up inside the node!
+-- For example, in the case of a terminating i(0) (like s("trig", {i(1,
+-- "text"), t"  ", i(0)})), we would like to NOT include the text entered into
+-- it in the snippet. Thus, the gravities of it and all its parents have to be
+-- set (in this case) false,false, if the i(0) were at the beginning of the
+-- snippet (weird??) they'd have to be true,true.
+--
+--
+-- Unfortunately, we cannot guarantee that two extmarks on the same position
+-- also have the same gravities, for exmample if the text inside a focused node
+-- is deleted, and then another unrelated node is focused, the two endpoints
+-- will have opposing rgravs.
+-- Maybe this whole procedure could be sped up further if we can assume that
+-- identical endpoints imply identical rgravs.
+local function focus_node(self, lrgrav, rrgrav)
+	local abs_pos = vim.deepcopy(self.absolute_position)
+
+	-- find nodes on path from self to root.
+	local nodes_path = node_util.get_nodes_between(self.parent.snippet, abs_pos)
+	-- nodes_on_path_to_self does not include the outer snippet, insert it here
+	-- (and also insert some dummy-value in abs_pos, such that abs_pos[i] the
+	-- position of node_path[i] in node_path[i-1] is).
+	table.insert(nodes_path, 1, self.parent.snippet)
+	table.insert(abs_pos, 1, 0)
+
+	-- direction is the direction away from this node, towards the outside of
+	-- the tree-representation of the snippet.
+	-- This is dubbed "direction" because it is the direction we will search in
+	-- to find nodes on one endpoint of self.
+	for _, direction in ipairs({ -1, 1 }) do
+		local self_direction_endpoint = self.mark:get_endpoint(direction)
+		local direction_rgrav = util.ternary(direction == -1, lrgrav, rrgrav)
+
+		-- adjust left rgrav of all nodes on path upwards to root/snippet:
+		-- (i st. self and the snippet are both handled)
+		for i = #abs_pos, 1, -1 do
+			local node = nodes_path[i]
+			local node_direction_endpoint = node.mark:get_endpoint(direction)
+
+			if
+				not util.pos_equal(
+					node_direction_endpoint,
+					self_direction_endpoint
+				)
+			then
+				-- stop adjusting rgravs once self no longer is on the boundary of
+				-- its parents, or if the rgrav is already set correctly.
+				break
+			end
+
+			node.mark:set_rgrav(direction, direction_rgrav)
+
+			-- can't use node.parent, since that might skip nodes (in the case of
+			-- dynamicNode, for example, the generated snippets parent is not the
+			-- dynamicNode, but its parent).
+			-- also: don't need to check for nil, because the
+			local node_above = nodes_path[i - 1]
+			if
+				node_above
+				and (
+					node_above.type == types.snippetNode
+					or node_above.type == types.snippet
+				)
+			then
+				node_above:set_sibling_rgravs(
+					self_direction_endpoint,
+					abs_pos[i],
+					direction,
+					direction_rgrav
+				)
+			end
+		end
+		self:subtree_set_pos_rgrav(
+			self_direction_endpoint,
+			-direction,
+			direction_rgrav
+		)
+	end
+end
+
+function Node:subtree_set_rgrav(rgrav)
+	self.mark:set_rgravs(rgrav, rgrav)
+end
+
+function Node:subtree_set_pos_rgrav(_, direction, rgrav)
+	self.mark:set_rgrav(-direction, rgrav)
+end
+
+function Node:focus()
+	focus_node(self, false, true)
+end
+
+function Node:set_text(text)
+	self:focus()
+
+	local node_from, node_to = self.mark:pos_begin_end_raw()
+	local ok = pcall(
+		vim.api.nvim_buf_set_text,
+		0,
+		node_from[1],
+		node_from[2],
+		node_to[1],
+		node_to[2],
+		text
+	)
+	-- we can assume that (part of) the snippet was deleted; remove it from
+	-- the jumplist.
+	if not ok then
+		error("[LuaSnip Failed]: " .. vim.inspect(text))
+	end
+end
+
 return {
 	Node = Node,
+	focus_node = focus_node,
 }

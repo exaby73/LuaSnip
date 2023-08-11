@@ -62,7 +62,7 @@ end
 function Path.expand(filepath)
 	local expanded = filepath
 		:gsub("^~", vim.env.HOME)
-		:gsub("^[.]" .. sep, MYCONFIG_ROOT .. sep)
+		:gsub("^[.][/\\]", MYCONFIG_ROOT .. sep)
 	return uv.fs_realpath(expanded)
 end
 
@@ -77,6 +77,14 @@ function Path.scandir(root)
 		while name do
 			name, type = uv.fs_scandir_next(fs)
 			local path = Path.join(root, name)
+			-- On networked filesystems, it can happen that we get
+			-- a name, but no type. In this case, we must query the
+			-- type manually via fs_stat(). See issue:
+			-- https://github.com/luvit/luv/issues/660
+			if name and not type then
+				local stat = uv.fs_stat(path)
+				type = stat and stat.type
+			end
 			if type == "file" then
 				table.insert(files, path)
 			elseif type == "directory" then
@@ -114,6 +122,10 @@ function Path.basename(filepath, ext)
 	else
 		return base
 	end
+end
+
+function Path.extension(fname)
+	return fname:match("%.([^%.]+)$")
 end
 
 -- returns nil if the file does not exist!

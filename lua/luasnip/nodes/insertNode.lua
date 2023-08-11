@@ -1,4 +1,5 @@
-local InsertNode = require("luasnip.nodes.node").Node:new()
+local Node = require("luasnip.nodes.node")
+local InsertNode = Node.Node:new()
 local ExitNode = InsertNode:new()
 local util = require("luasnip.util.util")
 local types = require("luasnip.util.types")
@@ -32,25 +33,31 @@ local function I(pos, static_text, opts)
 end
 extend_decorator.register(I, { arg_indx = 3 })
 
-function ExitNode:input_enter(no_move)
+function ExitNode:input_enter(no_move, dry_run)
+	if dry_run then
+		return
+	end
+
 	-- Don't enter node for -1-node, it isn't in the node-table.
 	if self.pos == 0 then
-		InsertNode.input_enter(self, no_move)
+		InsertNode.input_enter(self, no_move, dry_run)
 	else
 		-- -1-node:
-		self:set_mark_rgrav(true, true)
-		if not no_move then
-			local mark_begin_pos = self.mark:pos_begin_raw()
+		-- set rgrav true on left side of snippet. Text inserted now pushes the
+		-- snippet, and is not contained in it.
+		local begin_pos = self.mark:pos_begin_raw()
+		self.parent:subtree_set_pos_rgrav(begin_pos, 1, true)
 
+		if not no_move then
 			if vim.fn.mode() == "i" then
-				util.insert_move_on(mark_begin_pos)
+				util.insert_move_on(begin_pos)
 			else
 				vim.api.nvim_feedkeys(
 					vim.api.nvim_replace_termcodes("<Esc>", true, false, true),
 					"n",
 					true
 				)
-				util.normal_move_on_insert(mark_begin_pos)
+				util.normal_move_on_insert(begin_pos)
 			end
 		end
 
@@ -58,21 +65,43 @@ function ExitNode:input_enter(no_move)
 	end
 end
 
-function ExitNode:input_leave()
+function ExitNode:focus()
+	local lrgrav, rrgrav
+	local snippet = self.parent
+	-- if last of first node of the snippet, make inserted text move out of snippet.
+	if snippet.nodes[#snippet.nodes] == self then
+		lrgrav = false
+		rrgrav = false
+	elseif snippet.nodes[1] == self then
+		lrgrav = true
+		rrgrav = true
+	else
+		lrgrav = false
+		rrgrav = true
+	end
+
+	Node.focus_node(self, lrgrav, rrgrav)
+end
+
+function ExitNode:input_leave(no_move, dry_run)
+	if dry_run then
+		return
+	end
+
 	if self.pos == 0 then
-		InsertNode.input_leave(self)
+		InsertNode.input_leave(self, no_move, dry_run)
 	else
 		self:event(events.leave)
 	end
 end
 
-function ExitNode:jump_into(dir, no_move)
+function ExitNode:jump_into(dir, no_move, dry_run)
 	if not session.config.history then
-		self:input_enter(no_move)
+		self:input_enter(no_move, dry_run)
 		if (dir == 1 and not self.next) or (dir == -1 and not self.prev) then
 			if self.pos == 0 then
 				-- leave instantly, self won't be active snippet.
-				self:input_leave()
+				self:input_leave(no_move, dry_run)
 			end
 			return nil
 		else
@@ -80,7 +109,7 @@ function ExitNode:jump_into(dir, no_move)
 		end
 	else
 		-- if no next node, return self as next current node.
-		return InsertNode.jump_into(self, dir, no_move) or self
+		return InsertNode.jump_into(self, dir, no_move, dry_run) or self
 	end
 end
 
@@ -95,13 +124,19 @@ function ExitNode:is_interactive()
 	return true
 end
 
-function InsertNode:input_enter(no_move)
+function InsertNode:input_enter(no_move, dry_run)
+	if dry_run then
+		return
+	end
+
 	self.visited = true
 	self.mark:update_opts(self.ext_opts.active)
 
-	if not no_move then
-		self.parent:enter_node(self.indx)
+	-- no_move only prevents moving the cursor, but the active node should
+	-- still be focused.
+	self:focus()
 
+	if not no_move then
 		-- SELECT snippet text only when there is text to select (more oft than not there isnt).
 		local mark_begin_pos, mark_end_pos = self.mark:pos_begin_end_raw()
 		if not util.pos_equal(mark_begin_pos, mark_end_pos) then
@@ -120,55 +155,86 @@ function InsertNode:input_enter(no_move)
 				util.normal_move_on_insert(mark_begin_pos)
 			end
 		end
-	else
-		self.parent:enter_node(self.indx)
 	end
 
 	self:event(events.enter)
 end
 
-function InsertNode:jump_into(dir, no_move)
-	if self.inner_active then
+-- only necessary for insertNodes, inner_active (unlike `active`) does not occur
+-- in other nodes.
+-- Since insertNodes don't have `active`, we can use the dry_run.active-field
+-- for this.
+function InsertNode:init_dry_run_inner_active(dry_run)
+	if dry_run and dry_run.active[self] == nil then
+		dry_run.active[self] = self.inner_active
+	end
+end
+function InsertNode:is_inner_active(dry_run)
+	return (not dry_run and self.inner_active)
+		or (dry_run and dry_run.active[self])
+end
+
+function InsertNode:jump_into(dir, no_move, dry_run)
+	self:init_dry_run_inner_active(dry_run)
+
+	if self:is_inner_active(dry_run) then
 		if dir == 1 then
 			if self.next then
-				self.inner_active = false
-				if not session.config.history then
-					self.inner_first = nil
-					self.inner_last = nil
+				if not dry_run then
+					self.inner_active = false
+					if not session.config.history then
+						self.inner_first = nil
+						self.inner_last = nil
+					end
+				else
+					dry_run.active[self] = false
 				end
-				self:input_leave()
-				return self.next:jump_into(dir, no_move)
+
+				self:input_leave(no_move, dry_run)
+				return self.next:jump_into(dir, no_move, dry_run)
 			else
-				return false
+				return nil
 			end
 		else
 			if self.prev then
-				self.inner_active = false
-				if not session.config.history then
-					self.inner_first = nil
-					self.inner_last = nil
+				if not dry_run then
+					self.inner_active = false
+					if not session.config.history then
+						self.inner_first = nil
+						self.inner_last = nil
+					end
+				else
+					dry_run.active[self] = false
 				end
-				self:input_leave()
-				return self.prev:jump_into(dir, no_move)
+
+				self:input_leave(no_move, dry_run)
+				return self.prev:jump_into(dir, no_move, dry_run)
 			else
-				return false
+				return nil
 			end
 		end
 	else
-		self:input_enter(no_move)
+		self:input_enter(no_move, dry_run)
 		return self
 	end
 end
 
-function InsertNode:jump_from(dir, no_move)
+function InsertNode:jump_from(dir, no_move, dry_run)
+	self:init_dry_run_inner_active(dry_run)
+
 	if dir == 1 then
 		if self.inner_first then
-			self.inner_active = true
-			return self.inner_first:jump_into(dir, no_move)
+			if not dry_run then
+				self.inner_active = true
+			else
+				dry_run.active[self] = true
+			end
+
+			return self.inner_first:jump_into(dir, no_move, dry_run)
 		else
 			if self.next then
-				self:input_leave()
-				return self.next:jump_into(dir, no_move)
+				self:input_leave(no_move, dry_run)
+				return self.next:jump_into(dir, no_move, dry_run)
 			else
 				-- only happens for exitNodes, but easier to include here
 				-- and reuse this impl for them.
@@ -177,12 +243,17 @@ function InsertNode:jump_from(dir, no_move)
 		end
 	else
 		if self.inner_last then
-			self.inner_active = true
-			return self.inner_last:jump_into(dir, no_move)
+			if not dry_run then
+				self.inner_active = true
+			else
+				dry_run.active[self] = true
+			end
+
+			return self.inner_last:jump_into(dir, no_move, dry_run)
 		else
 			if self.prev then
-				self:input_leave()
-				return self.prev:jump_into(dir, no_move)
+				self:input_leave(no_move, dry_run)
+				return self.prev:jump_into(dir, no_move, dry_run)
 			else
 				return self
 			end
@@ -190,7 +261,11 @@ function InsertNode:jump_from(dir, no_move)
 	end
 end
 
-function InsertNode:input_leave()
+function InsertNode:input_leave(_, dry_run)
+	if dry_run then
+		return
+	end
+
 	self:event(events.leave)
 
 	self:update_dependents()

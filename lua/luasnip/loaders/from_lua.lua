@@ -24,21 +24,66 @@
 local cache = require("luasnip.loaders._caches").lua
 local path_mod = require("luasnip.util.path")
 local loader_util = require("luasnip.loaders.util")
-local util = require("luasnip.util.util")
-local str_util = require("luasnip.util.str")
 local ls = require("luasnip")
 local log = require("luasnip.util.log").new("lua-loader")
+local session = require("luasnip.session")
+local util = require("luasnip.util.util")
 
 local M = {}
 
-local function load_files(ft, files, add_opts)
-	for _, file in ipairs(files) do
-		local func_string = path_mod.read_file(file)
+-- ASSUMPTION: this function will only be called inside the snippet-constructor,
+-- to find the location of the lua-loaded file calling it.
+-- It is not exported, because it will (in its current state) only ever be used
+-- in one place, and it feels a bit wrong to expose put a function into `M`.
+-- Instead, it is inserted into the global environment before a luasnippet-file
+-- is loaded, and removed from it immediately when this is done
+local function get_loaded_file_debuginfo()
+	-- we can skip looking at the first four stackframes, since
+	-- 1   is this function
+	-- 2   is the snippet-constructor
+	-- ... (here anything is going on, could be 0 stackframes, could be many)
+	-- n-2 (at least 3) is the loaded file
+	-- n-1 (at least 4) is pcall
+	-- n   (at least 5) is _luasnip_load_files
+	local current_call_depth = 4
+	local debuginfo
 
-		local load_ok, func = pcall(loadstring, func_string)
-		if not load_ok then
-			log.error("Failed to load %s\n: %s", file, func)
-			error("Failed to load " .. file .. "\n: " .. func)
+	repeat
+		current_call_depth = current_call_depth + 1
+		debuginfo = debug.getinfo(current_call_depth, "n")
+	until debuginfo.name == "_luasnip_load_files"
+
+	-- ret is stored into a local, and not returned immediately to prevent tail
+	-- call optimization, which seems to invalidate the stackframe-numbers
+	-- determined earlier.
+	--
+	-- current_call_depth-0 is _luasnip_load_files,
+	-- current_call_depth-1 is pcall, and
+	-- current_call_depth-2 is the lua-loaded file.
+	-- "Sl": get only source-file and current line.
+	local ret = debug.getinfo(current_call_depth - 2, "Sl")
+	return ret
+end
+
+local function _luasnip_load_files(ft, files, add_opts)
+	for _, file in ipairs(files) do
+		-- vim.loader.enabled does not seem to be official api, so always reset
+		-- if the loader is available.
+		-- To be sure, even pcall it, in case there are conditions under which
+		-- it might error.
+		if vim.loader then
+			-- pcall, not sure if this can fail in some way..
+			-- Does not seem like it though
+			local ok, res = pcall(vim.loader.reset, file)
+			if not ok then
+				log.warn("Could not reset cache for file %s\n: %s", file, res)
+			end
+		end
+
+		local func, error_msg = loadfile(file)
+		if error_msg then
+			log.error("Failed to load %s\n: %s", file, error_msg)
+			error(string.format("Failed to load %s\n: %s", file, error_msg))
 		end
 
 		-- the loaded file may add snippets to these tables, they'll be
@@ -46,21 +91,36 @@ local function load_files(ft, files, add_opts)
 		local file_added_snippets = {}
 		local file_added_autosnippets = {}
 
-		setfenv(
-			func,
-			vim.tbl_extend(
-				"force",
-				-- extend the current(expected!) globals with the snip_env, and the two tables.
-				_G,
-				ls.get_snip_env(),
-				{
-					ls_file_snippets = file_added_snippets,
-					ls_file_autosnippets = file_added_autosnippets,
-				}
-			)
+		-- setup snip_env in func
+		local func_env = vim.tbl_extend(
+			"force",
+			-- extend the current(expected!) globals with the snip_env, and the
+			-- two tables.
+			_G,
+			ls.get_snip_env(),
+			{
+				ls_file_snippets = file_added_snippets,
+				ls_file_autosnippets = file_added_autosnippets,
+			}
 		)
+		-- defaults snip-env requires metatable for resolving
+		-- lazily-initialized keys. If we have to combine this with an eventual
+		-- metatable of _G, look into unifying ls.setup_snip_env and this.
+		setmetatable(func_env, getmetatable(ls.get_snip_env()))
+		setfenv(func, func_env)
 
+		-- Since this function has to reach the snippet-constructor, and fenvs
+		-- aren't inherited by called functions, we have to set it in the global
+		-- environment.
+		_G.__luasnip_get_loaded_file_frame_debuginfo = util.ternary(
+			session.config.loaders_store_source,
+			get_loaded_file_debuginfo,
+			nil
+		)
 		local run_ok, file_snippets, file_autosnippets = pcall(func)
+		-- immediately nil it.
+		_G.__luasnip_get_loaded_file_frame_debuginfo = nil
+
 		if not run_ok then
 			log.error("Failed to execute\n: %s", file, file_snippets)
 			error("Failed to execute " .. file .. "\n: " .. file_snippets)
@@ -113,7 +173,11 @@ end
 
 function M._load_lazy_loaded_ft(ft)
 	for _, load_call_paths in ipairs(cache.lazy_load_paths) do
-		load_files(ft, load_call_paths[ft] or {}, load_call_paths.add_opts)
+		_luasnip_load_files(
+			ft,
+			load_call_paths[ft] or {},
+			load_call_paths.add_opts
+		)
 	end
 end
 
@@ -145,7 +209,7 @@ function M.load(opts)
 		loader_util.extend_ft_paths(cache.ft_paths, load_paths)
 
 		for ft, files in pairs(load_paths) do
-			load_files(ft, files, add_opts)
+			_luasnip_load_files(ft, files, add_opts)
 		end
 	end
 end
@@ -170,7 +234,7 @@ function M.lazy_load(opts)
 					ft,
 					vim.inspect(files)
 				)
-				load_files(ft, files, add_opts)
+				_luasnip_load_files(ft, files, add_opts)
 
 				-- don't load these files again.
 				load_paths[ft] = nil
@@ -199,7 +263,7 @@ function M._reload_file(filename)
 		local ft = file_cache.ft
 
 		log.info("Re-loading snippets contributed by %s", filename)
-		load_files(ft, { filename }, add_opts)
+		_luasnip_load_files(ft, { filename }, add_opts)
 		ls.clean_invalidated({ inv_limit = 100 })
 	end
 end

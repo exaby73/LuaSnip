@@ -1,5 +1,8 @@
 local snip = require("luasnip.nodes.snippet").S
 local events = require("luasnip.util.events")
+local extend_decorator = require("luasnip.util.extend_decorator")
+local node_util = require("luasnip.nodes.util")
+
 local matches = {
 	default = [[[%w%.%_%-%"%']+$]],
 	line = "^.+$",
@@ -52,6 +55,18 @@ local function generate_opts(match_pattern, user_callback)
 	}
 end
 
+local function wrap_condition(user_condition, match_pattern)
+	if not user_condition then
+		user_condition = require("luasnip.util.util").yes
+	end
+
+	return function(line_to_cursor, matched_trigger, captures)
+		return line_to_cursor:sub(1, -1 - #matched_trigger):match(match_pattern)
+				~= nil
+			and user_condition(line_to_cursor, matched_trigger, captures)
+	end
+end
+
 local function postfix(context, nodes, opts)
 	opts = opts or {}
 	local user_callback = vim.tbl_get(opts, "callbacks", -1, events.pre_expand)
@@ -62,17 +77,11 @@ local function postfix(context, nodes, opts)
 		user_callback = { user_callback, { "nil", "function" } },
 	})
 
-	local match_pattern
-	if type(context) == "string" then
-		context = {
-			trig = context,
-		}
-		match_pattern = matches.default
-	else
-		match_pattern = context.match_pattern or matches.default
-	end
+	context = node_util.wrap_context(context)
+	context.wordTrig = false
+	local match_pattern = context.match_pattern or matches.default
+	context.condition = wrap_condition(context.condition, match_pattern)
 
-	context = vim.tbl_deep_extend("keep", context, { wordTrig = false })
 	opts = vim.tbl_deep_extend(
 		"force",
 		opts,
@@ -80,6 +89,11 @@ local function postfix(context, nodes, opts)
 	)
 	return snip(context, nodes, opts)
 end
+extend_decorator.register(
+	postfix,
+	{ arg_indx = 1, extend = node_util.snippet_extend_context },
+	{ arg_indx = 3 }
+)
 
 return {
 	postfix = postfix,

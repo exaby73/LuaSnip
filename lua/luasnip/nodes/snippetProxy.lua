@@ -15,8 +15,8 @@ local SnippetProxy = {}
 
 -- add Snippet-functions SnippetProxy can perform using the available data.
 SnippetProxy.matches = snip_mod.Snippet.matches
-
 SnippetProxy.invalidate = snip_mod.Snippet.invalidate
+SnippetProxy.retrieve_all = snip_mod.Snippet.retrieve_all
 
 function SnippetProxy:get_docstring()
 	return self.docstring
@@ -47,23 +47,35 @@ end
 
 -- some values of the snippet are nil by default, list them here so snippets
 -- aren't instantiated because of them.
-local license_to_nil = { priority = true, snippetType = true }
+local license_to_nil =
+	{ priority = true, snippetType = true, _source = true, filetype = true }
 
 -- context and opts are (almost) the same objects as in s(contex, nodes, opts), snippet is a string representing the snippet.
 -- opts can aditionally contain the key `parse_fn`, which will be used to parse
 -- the snippet. This is useful, since snipmate-snippets are parsed with a
 -- function than regular lsp-snippets.
+-- context can be nil, in that case the resulting object can't be inserted into
+-- the snippet-tables, but may be used after expansion (i.e. returned from
+-- snippet:copy)
 local function new(context, snippet, opts)
+	opts = opts or {}
+
 	-- default to regular lsp-parse-function.
 	local parse_fn = lsp_parse_fn
-	if opts and opts.parse_fn then
+
+	if opts.parse_fn then
 		parse_fn = opts.parse_fn
 	end
 	-- "error": there should not be duplicate keys, don't silently overwrite/keep.
 	local sp = vim.tbl_extend(
 		"error",
 		{},
-		snip_mod.init_snippet_context(context),
+		context
+				and snip_mod.init_snippet_context(
+					node_util.wrap_context(context),
+					opts
+				)
+			or {},
 		snip_mod.init_snippet_opts(opts),
 		node_util.init_node_opts(opts)
 	)
@@ -96,7 +108,10 @@ local function new(context, snippet, opts)
 	-- when the metatable has been changed. Therefore: set copy in each instance
 	-- of snippetProxy.
 	function sp:copy()
-		return self._snippet:copy()
+		local copy = self._snippet:copy()
+		copy.id = self.id
+
+		return copy
 	end
 
 	return sp

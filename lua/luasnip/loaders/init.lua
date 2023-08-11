@@ -1,9 +1,17 @@
 local Cache = require("luasnip.loaders._caches")
 local util = require("luasnip.util.util")
+local loader_util = require("luasnip.loaders.util")
 local Path = require("luasnip.util.path")
 
 local M = {}
 
+-- used to map cache-name to name passed to format.
+local clean_name = {
+	vscode_packages = "vscode",
+	vscode_standalone = "vscode-standalone",
+	snipmate = "snipmate",
+	lua = "lua",
+}
 local function default_format(path, _)
 	path = path:gsub(
 		vim.pesc(vim.fn.stdpath("data") .. "/site/pack/packer/start"),
@@ -20,12 +28,17 @@ local function default_edit(file)
 end
 
 --- Quickly jump to snippet-file from any source for the active filetypes.
----@param opts table, options for this function:
+---@param opts nil|table, options for this function:
+--- - ft_filter: fn(filetype:string) -> bool
+---   Optionally filter filetypes which can be picked from. `true` -> filetype
+---   is listed, `false` -> not listed.
+---
 --- - format: fn(path:string, source_name:string) -> string|nil
 ---   source_name is one of "vscode", "snipmate" or "lua".
 ---   May be used to format the displayed items. For example, replace the
 ---   excessively long packer-path with something shorter.
 ---   If format returns nil for some item, the item will not be displayed.
+---
 --- - edit: fn(file:string): this function is called with the snippet-file as
 ---   the lone argument.
 ---   The default is a function which just calls `vim.cmd("edit " .. file)`.
@@ -33,22 +46,24 @@ function M.edit_snippet_files(opts)
 	opts = opts or {}
 	local format = opts.format or default_format
 	local edit = opts.edit or default_edit
-	local extend = opts.extend or function()
+	local extend = opts.extend or function(_, _)
 		return {}
 	end
 
-	local fts = util.get_snippet_filetypes()
-	vim.ui.select(fts, {
-		prompt = "Select filetype:",
-	}, function(ft, _)
+	local function ft_edit_picker(ft, _)
 		if ft then
 			local ft_paths = {}
 			local items = {}
 
 			-- concat files from all loaders for the selected filetype ft.
-			for _, cache_name in ipairs({ "vscode", "snipmate", "lua" }) do
+			for _, cache_name in ipairs({
+				"vscode_packages",
+				"vscode_standalone",
+				"snipmate",
+				"lua",
+			}) do
 				for _, path in ipairs(Cache[cache_name].ft_paths[ft] or {}) do
-					local fmt_name = format(path, cache_name)
+					local fmt_name = format(path, clean_name[cache_name])
 					if fmt_name then
 						table.insert(ft_paths, path)
 						table.insert(items, fmt_name)
@@ -80,7 +95,32 @@ function M.edit_snippet_files(opts)
 				edit(ft_paths[1])
 			end
 		end
-	end)
+	end
+
+	local ft_filter = opts.ft_filter or util.yes
+
+	local all_fts = {}
+	vim.list_extend(all_fts, util.get_snippet_filetypes())
+	vim.list_extend(
+		all_fts,
+		loader_util.get_load_fts(vim.api.nvim_get_current_buf())
+	)
+	all_fts = util.deduplicate(all_fts)
+
+	local filtered_fts = {}
+	for _, ft in ipairs(all_fts) do
+		if ft_filter(ft) then
+			table.insert(filtered_fts, ft)
+		end
+	end
+
+	if #filtered_fts == 1 then
+		ft_edit_picker(filtered_fts[1])
+	elseif #filtered_fts > 1 then
+		vim.ui.select(filtered_fts, {
+			prompt = "Select filetype:",
+		}, ft_edit_picker)
+	end
 end
 
 function M.cleanup()
@@ -104,11 +144,12 @@ function M.load_lazy_loaded(fts)
 	end
 end
 
-vim.cmd([[
-		augroup luasnip_watch_reload
-		autocmd BufWritePost * lua require("luasnip.loaders").reload_file(vim.fn.expand("<afile>"))
-		augroup END
-	]])
+vim.api.nvim_create_autocmd("BufWritePost", {
+	group = vim.api.nvim_create_augroup("luasnip_watch_reload", {}),
+	callback = function()
+		require("luasnip.loaders").reload_file(vim.fn.expand("<afile>"))
+	end,
+})
 function M.reload_file(filename)
 	filename = Path.normalize(filename)
 	if not filename then
