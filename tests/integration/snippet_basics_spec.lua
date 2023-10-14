@@ -238,7 +238,8 @@ describe("snippets_basic", function()
 			unchanged = true,
 		})
 
-		-- jump back before outer.
+		-- jump back through outer.
+		-- (can no longer enter it through connections to other snippet)
 		exec_lua("ls.jump(-1)")
 		screen:expect({
 			grid = [[
@@ -247,14 +248,31 @@ describe("snippets_basic", function()
 			{2:-- INSERT --}                                      |]],
 			unchanged = true,
 		})
-		-- the snippet is not active anymore (cursor position doesn't change from last expansion).
+		-- last snippet is not forgotten (yet).
 		exec_lua("ls.jump(1)")
 		screen:expect({
 			grid = [[
-			^a[a[]ab]ab                                        |
+			a[^a{3:[]ab}]ab                                        |
 			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+
+		feed("<Esc>o")
+		exec_lua("ls.snip_expand(" .. snip .. ")")
+		screen:expect({
+			grid = [[
+			a[a[]ab]ab                                        |
+			a[^]ab                                             |
 			{2:-- INSERT --}                                      |]],
-			unchanged = true,
+		})
+		exec_lua("ls.jump(-1) ls.jump(-1)")
+
+		-- first snippet can't be accessed anymore.
+		screen:expect({
+			grid = [[
+			a[a[]ab]ab                                        |
+			^a[]ab                                             |
+			{2:-- INSERT --}                                      |]],
 		})
 	end)
 
@@ -576,62 +594,6 @@ describe("snippets_basic", function()
 		]]))
 	end)
 
-	it("{region,delete}_check_events works correctly", function()
-		exec_lua([[
-			ls.setup({
-				history = true,
-				region_check_events = {"CursorHold", "InsertLeave"},
-				delete_check_events = "TextChanged,InsertEnter",
-			})
-
-			ls.snip_expand(s("a", {
-				t"sometext", i(1, "someinsertnode")
-			}))
-		]])
-		screen:expect({
-			grid = [[
-  sometext^s{3:omeinsertnode}                            |
-  {0:~                                                 }|
-  {2:-- SELECT --}                                      |
-]],
-		})
-		-- leave snippet-area, and trigger insertLeave.
-		feed("<Esc>o<Esc>")
-		screen:expect({
-			grid = [[
-  sometextsomeinsertnode                            |
-  ^                                                  |
-                                                    |
-]],
-		})
-		-- make sure we're in the last tabstop (ie. region_check_events did its
-		-- job).
-		exec_lua("ls.jump(1)")
-		screen:expect({
-			grid = [[
-  sometextsomeinsertnode                            |
-  ^                                                  |
-                                                    |
-]],
-		})
-		-- not really necessary, but feels safer this way.
-		exec_lua("ls.jump(-1)")
-		screen:expect({
-			grid = [[
-  sometext^s{3:omeinsertnode}                            |
-                                                    |
-  {2:-- SELECT --}                                      |
-]],
-		})
-
-		-- delete snippet text
-		feed("<Esc>dd")
-		-- make sure the snippet is no longer active.
-		assert.is_true(exec_lua([[
-			return ls.session.current_nodes[vim.api.nvim_get_current_buf()] == nil
-		]]))
-	end)
-
 	it("autocommands are registered in different formats", function()
 		local function test_combination(setting_name, overridefn_name)
 			exec_lua(([[
@@ -744,10 +706,19 @@ describe("snippets_basic", function()
 
 				{
 					[[ s({trig="a", dscr = "thedescription"}, { t"justsometext" }) ]],
+					"description",
+					[[{"thedescription"}]],
+				},
+				{
+					[[ s({trig="a"}, { t"justsometext" }) ]],
+					"description",
+					[[{"a"}]],
+				},
+				{
+					[[ s({trig="a", dscr = "thedescription"}, { t"justsometext" }) ]],
 					"dscr",
 					[[{"thedescription"}]],
 				},
-				{ [[ s({trig="a"}, { t"justsometext" }) ]], "dscr", [[{"a"}]] },
 
 				{
 					[[ s({trig="a", docstring = "thedocstring"}, { t"justsometext" }) ]],
@@ -1187,5 +1158,247 @@ describe("snippets_basic", function()
 			{0:~                                                 }|
 			{2:-- INSERT --}                                      |]],
 		})
+	end)
+
+	it("Selection is yanked correctly.", function()
+		feed("iasdfasdfasdf<Cr>")
+		feed("𝔼sdfasdfasdf<Cr>")
+		feed("asdfasdfasdf<Cr>")
+		feed("<Esc>ggvjjll<Tab><Esc>u")
+		assert.are.same(
+			exec_lua(
+				[[return vim.api.nvim_buf_get_var(0, "LUASNIP_SELECT_RAW")]]
+			),
+			{ "asdfasdfasdf", "𝔼sdfasdfasdf", "asd" }
+		)
+
+		feed("ggll<C-V>lllljj<Tab><Esc>u")
+		assert.are.same(
+			exec_lua(
+				[[return vim.api.nvim_buf_get_var(0, "LUASNIP_SELECT_RAW")]]
+			),
+			{ "dfasd", "dfasd", "dfasd" }
+		)
+	end)
+
+	it("Selection is yanked correctly with mutlibyte characters.", function()
+		feed("i𝔼f-𝔼abc<Esc>v^<Tab><Esc>u")
+		assert.are.same(
+			exec_lua(
+				[[return vim.api.nvim_buf_get_var(0, "LUASNIP_SELECT_RAW")]]
+			),
+			{ "𝔼f-𝔼abc" }
+		)
+
+		feed("^lvlll<Tab><Esc>u")
+		assert.are.same(
+			exec_lua(
+				[[return vim.api.nvim_buf_get_var(0, "LUASNIP_SELECT_RAW")]]
+			),
+			{ "f-𝔼a" }
+		)
+
+		feed("^V<Tab><Esc>u")
+		assert.are.same(
+			exec_lua(
+				[[return vim.api.nvim_buf_get_var(0, "LUASNIP_SELECT_RAW")]]
+			),
+			{ "𝔼f-𝔼abc" }
+		)
+	end)
+
+	it("Nested $0 remains active if there is no real next node.", function()
+		exec_lua([[
+			ls.add_snippets("all", {
+				s("aa", { i(1, "a:"), t"(", i(0), t")" })
+			})
+		]])
+
+		-- expand nested.
+		feed("iaa")
+		exec_lua([[ ls.expand() ]])
+		exec_lua([[ ls.jump(1) ]])
+		screen:expect({
+			grid = [[
+			a:(^)                                              |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		feed("aa")
+		exec_lua([[ ls.expand() ]])
+		exec_lua([[ ls.jump(1) ]])
+		screen:expect({
+			grid = [[
+			a:(a:(^))                                          |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		feed("aa")
+		exec_lua([[ ls.expand() ]])
+		exec_lua([[ ls.jump(1) ]])
+		screen:expect({
+			grid = [[
+			a:(a:(a:(^)))                                      |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		-- jump should not move cursor!
+		-- for some reason need multiple jumps to trigger the mistake.
+		exec_lua([[ ls.jump(1)]])
+		exec_lua([[ ls.jump(1)]])
+		screen:expect({ unchanged = true })
+	end)
+
+	it("exit_out_of_region activates last node of snippet-root.", function()
+		exec_lua([[
+			ls.setup({
+				link_children = true
+			})
+
+			ls.add_snippets("all", { s("aa", { i(1), t"( ", i(0, "0-text"), t" )" }) })
+		]])
+
+		feed("iaa")
+		exec_lua("ls.expand()")
+		feed("<Esc>lllliaa")
+		exec_lua("ls.expand()")
+		exec_lua("ls.jump(-1) ls.jump(-1)")
+		screen:expect({
+			grid = [[
+			^( 0-( 0-text )text )                              |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+
+		feed("<Esc>o")
+		exec_lua("ls.exit_out_of_region(ls.session.current_nodes[1])")
+
+		-- verify that we are in the $0 of the nested snippet.
+		exec_lua("ls.jump(-1)")
+		screen:expect({
+			grid = [[
+			( 0-^( 0-text )text )                              |
+			                                                  |
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua("ls.jump(1)")
+		screen:expect({
+			grid = [[
+			( 0-( ^0{3:-text} )text )                              |
+			                                                  |
+			{2:-- SELECT --}                                      |]],
+		})
+	end)
+
+	it("focus correctly adjusts gravities of parent-snippets.", function()
+		exec_lua([[
+			ls.setup{
+				link_children = true
+			}
+		]])
+		exec_lua([[ls.lsp_expand("a$1$1a")]])
+		exec_lua([[ls.lsp_expand("b$1")]])
+		feed("ccc")
+		exec_lua([[ls.active_update_dependents()]])
+		feed("dddd")
+		-- Here's how this fails if `focus` does not behave correctly (ie. only
+		-- adjusts extmarks in the snippet the current node is inside):
+		-- child has a changed $1, triggers update of own snippets, and
+		-- transitively of the parent-$1.
+		-- Since the parent has a functionNode that copies the $1's text, it
+		-- has to first focus the fNode, and update the text. This shifts the
+		-- gravity of the end of the parent-$1-extmark to the left.
+		-- Here the first failure may occur: if the child-extmark is not
+		-- adjusted as well, it will contain the text that belongs to the
+		-- functionNode.
+		-- The second issue that may occur is a bit more subtle:
+		-- After the whole update procedure is done, we have to refocus the
+		-- current node (since we have to assume that the update changed focus
+		-- s.t. the current node no longer has correct extmarks).
+		-- If, in doing this, the parent-$1-extmark end-gravity is not restored
+		-- to the right, the child-snippet will extend beyond the extmark of
+		-- its parent-node, the parent-$1.
+		exec_lua([[ls.jump(-1) ls.jump(-1)]])
+		-- highlights outer $1.
+		exec_lua([[ls.jump(1)]])
+		screen:expect({
+			grid = [[
+			a^b{3:cccdddd}bcccdddda                                |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+		-- and then inner $1.
+		exec_lua([[ls.jump(1)]])
+		screen:expect({
+			grid = [[
+			ab^c{3:ccdddd}bcccdddda                                |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+	end)
+
+	it("focus correcty adjusts gravity of parent-snippets, v2.", function()
+		exec_lua([[
+			ls.setup({
+				history = true
+			})
+		]])
+
+		exec_lua([[ls.lsp_expand("\\$$1\\$")]])
+		feed("<Esc>l")
+		exec_lua([[ls.lsp_expand("\\rightarrow")]])
+		screen:expect({
+			grid = [[
+			$\rightarrow^$                                     |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		feed("<Space>s")
+		exec_lua([[ls.jump(1)]])
+		screen:expect({
+			grid = [[
+			$\rightarrow s$^                                   |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		-- make sure the entire placeholder is highlighted.
+		exec_lua([[ls.jump(-1)]])
+		screen:expect({
+			grid = [[
+			$^\{3:rightarrow s}$                                   |
+			{0:~                                                 }|
+			{2:-- SELECT --}                                      |]],
+		})
+		exec_lua([[ls.jump(-1)]])
+		screen:expect({
+			grid = [[
+			$\rightarrow^ s$                                   |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+	end)
+
+	it("unlink_current works.", function()
+		exec_lua([[ls.lsp_expand("$1 adsf $2")]])
+		exec_lua([[ls.jump( 1)]])
+		screen:expect({
+			grid = [[
+			 adsf ^                                            |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua([[ls.jump(-1)]])
+		screen:expect({
+			grid = [[
+			^ adsf                                             |
+			{0:~                                                 }|
+			{2:-- INSERT --}                                      |]],
+		})
+		exec_lua([[ls.unlink_current()]])
+		exec_lua([[ls.jump( 1)]])
+		screen:expect({ unchanged = true })
 	end)
 end)

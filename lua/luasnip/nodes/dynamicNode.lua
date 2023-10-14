@@ -119,6 +119,10 @@ function DynamicNode:update()
 		return
 	end
 
+	if not self.parent.snippet:extmarks_valid() then
+		error("Refusing to update inside a snippet with invalid extmarks")
+	end
+
 	local tmp
 	if self.snip then
 		if not args then
@@ -355,9 +359,13 @@ function DynamicNode:update_restore()
 		-- gravity of self.
 		tmp:subtree_set_pos_rgrav(to, -1, true)
 
-		tmp:update_restore()
-
+		-- set snip before update_restore, since update_restore involves
+		-- calling `focus`, and that needs `snip` to be set.
+		-- If it is not set, tmp is not reachable via get_nodes_between.
+		-- (TODO: This is pretty bad, have to rethink design sometime).
 		self.snip = tmp
+
+		tmp:update_restore()
 	else
 		self:update()
 	end
@@ -417,6 +425,13 @@ function DynamicNode:subtree_set_rgrav(rgrav)
 	if self.snip then
 		self.snip:subtree_set_rgrav(rgrav)
 	end
+end
+
+function DynamicNode:extmarks_valid()
+	if self.snip then
+		return node_util.generic_extmarks_valid(self, self.snip)
+	end
+	return true
 end
 
 return {

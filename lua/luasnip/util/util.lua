@@ -307,25 +307,31 @@ local function get_min_indent(lines)
 	return min_indent
 end
 
--- there's probably a better way to do this.
-local function byte_start_to_byte_end(pos)
-	local line = vim.api.nvim_buf_get_lines(0, pos[1], pos[1] + 1, false)
-	-- line[1]: get_lines returns table.
-	-- col may be one past the end (for linebreak)
-	-- byteindex rounds toward end of the multibyte-character.
-	return vim.str_byteindex(
-		line[1] .. " " or "",
-		vim.str_utfindex(line[1] .. " " or "", pos[2])
-	)
+-- nvim0.7 is missing vim.v.maxcol :/
+-- but this should suffice.
+local maxcol = vim.v.maxcol or 2147483647
+-- displaycol_to may be nil for end-of-line
+local function displaycol_trim_line(line, displaycol_from, displaycol_to)
+	local line_len = vim.str_utfindex(line, #line)
+
+	-- bytes are 0-based, start- and end-inclusive.
+	-- str_byteindex gives last byte, get first byte is last byte of previous
+	-- symbol +1.
+	local start_byte = vim.str_byteindex(line, displaycol_from - 1) + 1
+	local end_byte =
+		vim.str_byteindex(line, math.min(displaycol_to or maxcol, line_len))
+
+	return line:sub(start_byte, end_byte)
 end
 
 local function store_selection()
-	local start_line, start_col = vim.fn.line("'<"), vim.fn.col("'<")
+	-- _col are positions in display-columns, so utf-index, 1-based.
+	-- lines are 0-based.
+	local _, start_line, start_col, _ = unpack(vim.fn.getcharpos("'<"))
+	start_line = start_line - 1
 
-	local end_line = vim.fn.line("'>")
-	-- col of '>/'< is the first byte, in case of multibyte. As the entire
-	-- multibyte-string has to be in the selection, this needs to be converted.
-	local end_col = byte_start_to_byte_end({ end_line - 1, vim.fn.col("'>") })
+	local _, end_line, end_col, _ = unpack(vim.fn.getcharpos("'>"))
+	end_line = end_line - 1
 
 	local mode = vim.fn.visualmode()
 	if
@@ -335,24 +341,33 @@ local function store_selection()
 		end_col = end_col - 1
 	end
 
+	-- include final line.
+	local lines = vim.api.nvim_buf_get_lines(0, start_line, end_line + 1, true)
+
 	local chunks = {}
-	local lines = vim.api.nvim_buf_get_lines(0, start_line - 1, end_line, true)
 	if start_line == end_line then
-		chunks = { lines[1]:sub(start_col, end_col) }
+		chunks = { displaycol_trim_line(lines[1], start_col, end_col) }
 	else
-		local first_col = 0
+		-- displaycolumns!
+		local first_col = 1
 		local last_col = nil
 		if mode:lower() ~= "v" then -- mode is block
 			first_col = start_col
 			last_col = end_col
 		end
-		chunks = { lines[1]:sub(start_col, last_col) }
+		chunks = { displaycol_trim_line(lines[1], start_col, last_col) }
 
 		-- potentially trim lines (Block).
 		for cl = 2, #lines - 1 do
-			table.insert(chunks, lines[cl]:sub(first_col, last_col))
+			table.insert(
+				chunks,
+				displaycol_trim_line(lines[cl], first_col, last_col)
+			)
 		end
-		table.insert(chunks, lines[#lines]:sub(first_col, end_col))
+		table.insert(
+			chunks,
+			displaycol_trim_line(lines[#lines], first_col, end_col)
+		)
 	end
 
 	-- init with raw selection.
@@ -597,6 +612,24 @@ local function ternary(cond, if_val, else_val)
 	end
 end
 
+-- just compare two integers.
+local function cmp(i1, i2)
+	-- lets hope this ends up as one cmp.
+	if i1 < i2 then
+		return -1
+	end
+	if i1 > i2 then
+		return 1
+	end
+	return 0
+end
+
+-- compare two positions, <0 => pos1<pos2,  0 => pos1=pos2,  >0 => pos1 > pos2.
+local function pos_cmp(pos1, pos2)
+	-- if row is different it determines result, otherwise the column does.
+	return 2 * cmp(pos1[1], pos2[1]) + cmp(pos1[2], pos2[2])
+end
+
 return {
 	get_cursor_0ind = get_cursor_0ind,
 	set_cursor_0ind = set_cursor_0ind,
@@ -644,4 +677,5 @@ return {
 	lazy_table = lazy_table,
 	ternary = ternary,
 	jsregexp = jsregexp_ok and jsregexp,
+	pos_cmp = pos_cmp,
 }

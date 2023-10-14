@@ -118,6 +118,41 @@ ls.add_snippets("all", {
 It is possible to make snippets from one filetype available to another using
 `ls.filetype_extend`, more info on that in the section [API](#api-2).
 
+## Snippet Insertion
+When a new snippet is expanded, it can be connected with the snippets that have
+already been expanded in the buffer in various ways.  
+First of all, Luasnip distinguishes between root-snippets and child-snippets.
+The latter are nested inside other snippets, so when jumping through a snippet,
+one may also traverse the child-snippets expanded inside it, more or less as if
+the child just contains more nodes of the parent.  
+Root-snippets are of course characterised by not being child-snippets.  
+When expanding a new snippet, it becomes a child of the snippet whose region it
+is expanded inside, and a root if it is not inside any snippet's region.  
+If it is inside another snippet, the specific node it is inside is determined,
+and the snippet then nested inside that node.
+* If that node is interactive (for example, an `insertNode`), the new snippet
+  will be traversed when the node is visited, as long as the
+  configuration-option `link_children` is enabled. If it is not enabled, it is
+  possible to jump from the snippet to the node, but not the other way around.
+* If that node is not interactive, the snippet will be linked to the currently
+  active node, also such that it will not be jumped to again once it is left.
+  This is to prevent jumping large distances across the buffer as much as
+  possible. There may still be one large jump from the snippet back to the
+  current node it is nested inside, but that seems hard to avoid.  
+  Thus, one should design snippets such that the regions where other snippets
+  may be expanded are inside `insertNodes`.
+
+If the snippet is not a child, but a root, it can be linked up with the roots
+immediately adjacent to it by enabling `link_roots` in `setup`.
+Since by default only one root is remembered, one should also set `keep_roots`
+if `link_roots` is enabled. The two are separate options, since roots that are
+not linked can still be reached by `ls.activate_node()`. This setup (remember
+roots, but don't jump to them) is useful for a super-tab like mapping (`<Tab>`
+and jump on the same key), where one would like to still enter previous roots.
+Since there would almost always be more jumps if the roots are linked, regular
+`<Tab>` would not work almost all the time, and thus `link_roots` has to stay
+disabled.
+
 # Node
 
 Every node accepts, as its last parameter, an optional table of arguments.
@@ -176,7 +211,7 @@ s({trig="trigger"}, {})
     By default, "matches" means the text in front of the cursor matches the
     trigger exactly, this behaviour can be modified through `trigEngine`
   - `name`: string, can be used by e.g. `nvim-compe` to identify the snippet.
-  - `dscr`: string, description of the snippet, \n-separated or table
+  - `desc` (or `dscr`): string, description of the snippet, \n-separated or table
     for multiple lines.
   - `wordTrig`: boolean, if true, the snippet is only expanded if the word
     (`[%w_]+`) before the cursor matches the trigger entirely.
@@ -254,7 +289,7 @@ s({trig="trigger"}, {})
     read it for more examples.
 
   - `docstring`: string, textual representation of the snippet, specified like
-    `dscr`. Overrides docstrings loaded from json.
+    `desc`. Overrides docstrings loaded from json.
   - `docTrig`: string, used as `line_to_cursor` during docstring-generation.
     This might be relevant if the snippet relies on specific values in the
     capture-groups (for example, numbers, which won't work with the default
@@ -271,6 +306,35 @@ s({trig="trigger"}, {})
     `ls.config.setup({ enable_autosnippets = true })` if you want to use this
     feature). If unset it depends on how the snippet is added of which type the
     snippet will be.
+  - `resolveExpandParams`: `fn(snippet, line_to_cursor, matched_trigger, captures) -> table|nil`, where
+    - `snippet`: `Snippet`, the expanding snippet object
+    - `line_to_cursor`: `string`, the line up to the cursor.
+    - `matched_trigger`: `string`, the fully matched trigger (can be retrieved
+    	from `line_to_cursor`, but we already have that info here :D)
+    - `captures`: `captures` as returned by `trigEngine`.
+
+    This function will be evaluated in `Snippet:matches()` to decide whether
+    the snippet can be expanded or not.  
+    Returns a table if the snippet can be expanded, `nil` if can not. The
+    returned table can contain any of these fields:
+      - `trigger`: `string`, the fully matched trigger.
+      - `captures`: `table`, this list could update the capture-groups from
+        parameter in snippet expansion.
+        Both `trigger` and `captures` can override the values returned via
+        `trigEngine`.  
+      - `clear_region`: `{ "from": {<row>, <column>}, "to": {<row>, <column>} }`,
+        both (0, 0)-indexed, the region where text has to be cleared before
+        inserting the snippet.
+      - `env_override`: `map string->(string[]|string)`, override or extend
+        the snippet's environment (`snip.env`)
+
+      If any of these is `nil`, the default is used (`trigger` and `captures` as
+      returned by `trigEngine`, `clear_region` such that exactly the trigger is
+      deleted, no overridden environment-variables).
+
+      A good example for the usage of `resolveExpandParams` can be found in
+      the implementation of
+      [`postfix`](https://github.com/L3MON4D3/LuaSnip/blob/master/lua/luasnip/extras/postfix.lua).
   - `condition`: `fn(line_to_cursor, matched_trigger, captures) -> bool`, where
       - `line_to_cursor`: `string`, the line up to the cursor.
       - `matched_trigger`: `string`, the fully matched trigger (can be retrieved
@@ -1747,6 +1811,244 @@ below) it will get run after the builtin callback.
 }
 ```
 
+## Treesitter-Postfix-Snippet
+
+Instead of triggering a postfix-snippet when some pattern matches in front of
+the trigger, it might be useful to match if some specific treesitter-nodes
+surround/are in front of the trigger.  
+While this functionality can also be implemented by a cusutom
+`resolveExpandParams`, this helper simplifies the common cases.  
+
+This matching of treesitter-nodes can be done either
+* by providing a query and the name of the capture that should be in front of
+  the trigger (in most cases, the complete match, but requiring specific nodes
+  before/after the matched node may be useful as well), or
+* by providing a function that manually walks the node-tree, and returns the
+  node in front of the trigger on success (for increased flexibility).
+
+A simple example, which surrounds the previous node's text preceeding the `.mv`
+with `std::move()` in cpp files, looks like:
+
+```lua
+local treesitter_postfix = require("luasnip.extras.treesitter_postfix").treesitter_postfix
+
+treesitter_postfix({
+    trig = ".mv",
+    matchTSNode = {
+        query = [[
+            [
+              (call_expression)
+              (identifier)
+              (template_function)
+              (subscript_expression)
+              (field_expression)
+              (user_defined_literal)
+            ] @prefix
+        ]]
+        query_lang = "cpp"
+    },
+},{
+    f(function(_, parent)
+        local node_content = table.concat(parent.snippet.env.LS_TSMATCH, '\n')
+        local replaced_content = ("std::move(%s)"):format(node_content)
+        return vim.split(ret_str, "\n", { trimempty = false })
+    end)
+})
+```
+
+`LS_TSMATCH` is the treesitter-postfix equivalent to `POSTFIX_MATCH`, and is
+populated with the match (in this case the text of a treesitter-node) in front
+of the trigger.
+
+<!-- panvimdoc-ignore-start -->
+
+![treesitter-postfix](https://user-images.githubusercontent.com/6359934/260666471-a60589aa-4454-4a9c-a103-87775c2cdf04.gif)
+
+<!-- panvimdoc-ignore-end -->
+
+The arguments to `treesitter_postfix` are identical to the arguments to `s` but
+with a few extra options.
+
+The first argument has to be a table, which defines at least `trig` and
+`matchTSNode`. All keys from the regular `s` may be set here (except for
+`wordTrig`, which will be ignored), and additionally the following:
+
+- `reparseBuffer`, `string?`: Sometimes the trigger may interfere with
+  treesitter recognizing queries correctly. With this option, the trigger may
+  either be removed from the live-buffer (`"live"`), from a copy of the buffer
+  (`"copy"`), or not at all (`nil`).
+- `matchTSNode`: How to determine whether there is a matching node in front of
+  the cursor. There are two options:
+  * `fun(parser: LuaSnip.extra.TSParser, pos: { [1]: number, [2]: number }): LuaSnip.extra.NamedTSMatch?, TSNode?
+    Manually determine whether there is a matching node that ends just before
+    `pos` (the beginning of the trigger).  
+    Return `nil,nil` if there is no match, otherwise first return a table
+    mapping names to nodes (the text, position and type of these will be
+    provided via `snip.env`), and second the node that is the matched node.
+  * `LuaSnip.extra.MatchTSNodeOpts`, which represents a query and provides all
+    captures of the matched pattern in `NamedTSMatch`. It contains the following
+    options:
+    * `query`, `string`: The query, in textual form.
+    * `query_name`, `string`: The name of the runtime-query to be used (passed
+      to `query.get()`), defaults to `"luasnip"` (so one could create a
+      file which only contains queries used by luasnip, like
+      `$CONFDIR/queries/<lang>/luasnip.scm`, which might make sense to define
+      general concepts independent of a single snippet).  
+      `query` and `query_name` are mutually exclusive, only one of both shall be
+      defined.  
+    * `query_lang`, `string`: The language of the query. This is the only
+      required parameter to this function, since there's no sufficiently
+      straightforward way to determine the language of the query for us.
+      Consider using `extend_override` to define a `ts_postfix`-function that
+      automatically fills in the language for the filetype of the snippet-file.
+    * `match_captures`, `string|string[]`: The capture(s) to use for determining
+      the actual prefix (so the node that should be immediately in front of the
+      trigger). This defaults to just `"prefix"`.
+    * `select`, `string?|fun(): LuaSnip.extra.MatchSelector`: Since there may be
+      multiple matching captures in front of the cursor, there has to be some
+      way to select the node that will actually be used.  
+      If this is a string, it has to be one of "any", "shortest", or "longest",
+      which mean that any, the shortest, or the longest match is used.  
+      If it is a function, it must return a table with two fields, `record` and
+      `retrieve`. `record` is called with a TSMatch and a potential node for the
+      ts-match, and may return `true` to abort the selection-procedure.
+      `retrieve` must return either a TSMatch-TSNode-tuple (which is used as the
+      match) or `nil`, to signify that there is no match.  
+      `lua/luasnip/extras/_treesitter.lua` contains the table
+      `builtin_tsnode_selectors`, which contains the implementations for
+      any/shortest/longest, which can be used as examples for more complicated
+      custom-selectors.
+
+The text of the matched node can be accessed as `snip.env.LS_TSMATCH`.  
+The text of the nodes returned as `NamedTSMatch` can be accessed as
+`snip.env.LS_TSCAPTURE_<node-name-in-caps>`, and their range and type as
+`snip.env.LS_TSDATA.<node-name-NOT-in-caps>.range/type` (where range is a
+tuple of row-col-tuples, both 0-indexed).  
+
+For a query like
+```scm
+(function_declaration
+  name: (identifier) @fname
+  parameters: (parameters) @params
+  body: (block) @body
+) @prefix
+```
+
+matched against
+
+```lua
+function add(a, b)
+    return a + b
+end
+```
+
+`snip.env` would contain:
+* `LS_TSMATCH`: `{ "function add(a, b)", "\treturn a + b", "end" }`
+* `LS_TSDATA`:
+  ```lua
+  {
+    body = {
+      range = { { 1, 1 }, { 1, 13 } },
+      type = "block"
+    },
+    fname = {
+      range = { { 0, 9 }, { 0, 12 } },
+      type = "identifier"
+    },
+    params = {
+      range = { { 0, 12 }, { 0, 18 } },
+      type = "parameters"
+    },
+    prefix = {
+      range = { { 0, 0 }, { 2, 3 } },
+      type = "function_declaration"
+    }
+  }
+  ```
+* `LS_TSCAPTURE_FNAME`: `{ "add" }`
+* `LS_TSCAPTURE_PARAMS`: `{ "(a, b)" }`
+* `LS_TSCAPTURE_BODY`: `{ "return a + b" }`
+* `LS_TSCAPTURE_PREFIX`: `{ "function add(a, b)", "\treturn a + b", "end" }`
+
+(note that all variables containing text of nodes are string-arrays, one entry
+for each line)
+
+There is one important caveat when accessing `LS_TSDATA` in
+function/dynamicNodes: It won't contain the values as specified here while
+generating docstrings (in fact, it won't even be a table).  
+Since docstrings have to be generated without any runtime-information, we just
+have to provide dummy-data in `env`, which will be some kind of string related
+to the name of the env-variable.  
+Since the structure of `LS_TSDATA` obviously does not fit that model, we can't
+really handle it in a nice way (at least yet). So, for now, best include a check
+like `local static_evaluation = type(env.LS_TSDATA) == "string"`, and behave
+accordingly if `static_evaluation` is true (for example, return some value
+tailored for displaying it in a docstring).
+
+One more example, which actually uses a few captures:
+```lua
+ts_post({
+    matchTSNode = {
+        query = [[
+            (function_declaration
+              name: (identifier) @fname
+              parameters: (parameters) @params
+              body: (block) @body
+            ) @prefix
+        ]],
+        query_lang = "lua",
+    },
+    trig = ".var"
+}, fmt([[
+    local {} = function{}
+        {}
+    end
+]], {
+    l(l.LS_TSCAPTURE_FNAME),
+    l(l.LS_TSCAPTURE_PARAMS),
+    l(l.LS_TSCAPTURE_BODY),
+}))
+```
+<!-- panvimdoc-ignore-start -->
+
+![treesitter-postfix-2](https://github.com/L3MON4D3/LuaSnip/assets/41961280/37868d75-3240-4a47-bd80-5e8666778b71)
+
+<!-- panvimdoc-ignore-end -->
+
+The module `luasnip.extras.treesitter_postfix` contains a few functions that may
+be useful for creating more efficient ts-postfix-snippets.  
+Nested in `builtin.tsnode_matcher` are:
+* `fun find_topmost_types(types: string[]): MatchTSNodeFunc`: Generates
+  a `LuaSnip.extra.MatchTSNodeFunc` which returns the last parent whose type
+  is in `types`.
+* `fun find_first_types(types: string[]): MatchTSNodeFunc`: Similar to
+  `find_topmost_types`, only this one matches the first parent whose type is in
+  types.
+* `find_nth_parent(n: number): MatchTSNodeFunc`: Simply matches the `n`-th
+  parent of the innermost node infront of the trigger.
+
+With `find_topmost_types`, the first example can be implemented more
+efficiently (without needing a whole query):
+```lua
+local postfix_builtin = require("luasnip.extras.treesitter_postfix").builtin
+
+ls.add_snippets("all", {
+	ts_post({
+		matchTSNode = postfix_builtin.tsnode_matcher.find_topmost_types({
+			"call_expression",
+			"identifier",
+			"template_function",
+			"subscript_expression",
+			"field_expression",
+			"user_defined_literal"
+		}),
+		trig = ".mv"
+	}, {
+		l(l_str.format("std::move(%s)", l.LS_TSMATCH))
+	})
+}, {key = "asdf"})
+```
+
 ## Snippet List
 
 ```lua
@@ -2265,22 +2567,23 @@ For easy editing of these files, LuaSnip provides a `vim.ui.select`-based dialog
 ([Loaders-edit_snippets](#edit_snippets)) where first the filetype, and then the
 file can be selected.
 
-### Snippet-specific filetypes
+## Snippet-specific filetypes
 Some loaders (vscode,lua) support giving snippets generated in some file their
 own filetype (vscode via `scope`, lua via the underlying `filetype`-option for
 snippets). These snippet-specific filetypes are not considered when determining
 which files to `lazy_load` for some filetype, this is exclusively determined by
 the `language` associated with a file in vscodes' `package.json`, and the
-file/directory-name in lua.  
-This can be resolved relatively easily in vscode, where the `language`
-advertised in `package.json` can just be a superset of the `scope`s in the file.  
-Another simplistic solution is to set the language to `all` (in lua, it might
-make sense to create a directory `luasnippets/all/*.lua` to group these files
-together).  
-Another approach is to modify `load_ft_func` to load a custom filetype if the
-snippets should be activated, and store the snippets in a file for that
-filetype. This can be used to group snippets by e.g. framework, and load them
-once a file belonging to such a framework is edited.
+file/directory-name in lua.
+
+ * This can be resolved relatively easily in vscode, where the `language`
+   advertised in `package.json` can just be a superset of the `scope`s in the file.
+ * Another simplistic solution is to set the language to `all` (in lua, it might
+   make sense to create a directory `luasnippets/all/*.lua` to group these files
+   together).
+ * Another approach is to modify `load_ft_func` to load a custom filetype if the
+   snippets should be activated, and store the snippets in a file for that
+   filetype. This can be used to group snippets by e.g. framework, and load them
+   once a file belonging to such a framework is edited.
 
 **Example**:  
 `react.lua`
@@ -2304,35 +2607,8 @@ load_ft_func = function(bufnr)
 end
 ```
 
-
-## Troubleshooting
-
-* LuaSnip uses `all` as the global filetype. As most snippet collections don't
-  explicitly target LuaSnip, they may not provide global snippets for this
-  filetype, but another, like `_` (`honza/vim-snippets`).
-  In these cases, it's necessary to extend LuaSnip's global filetype with the
-  collection's global filetype:
-  ```lua
-  ls.filetype_extend("all", { "_" })
-  ```
-
-  In general, if some snippets don't show up when loading a collection, a good
-  first step is checking the filetype LuaSnip is actually looking into (print
-  them for the current buffer via `:lua
-  print(vim.inspect(require("luasnip").get_snippet_filetypes()))`), against the
-  one the missing snippet is provided for (in the collection).  
-  If there is indeed a mismatch, `filetype_extend` can be used to also search
-  the collection's filetype:
-  ```lua
-  ls.filetype_extend("<luasnip-filetype>", { "<collection-filetype>" })
-  ```
-
-* As we only load `lazy_load`ed snippets on some events, `lazy_load` will
-  probably not play nice when a non-default `ft_func` is used: if it depends on
-  e.g. the cursor position, only the filetypes for the cursor position when the
-  `lazy_load` events are triggered will be loaded. Check
-  [Extras-Filetype-Function](#filetype-functions)'s `extend_load_ft` for a
-  solution.
+See the [Troubleshooting-Adding Snippets-Loaders](#troubleshooting-adding-snippets-loaders)
+section if one is having issues adding snippets via loaders.
 
 ## VS-Code
 
@@ -3151,10 +3427,15 @@ It is also possible to get/set the source of a snippet via API:
 
 These are the settings you can provide to `luasnip.setup()`:
 
-- `history`: If true, snippets that were exited can still be jumped back into.
-  As snippets are not removed when their text is deleted, they have to be
-  removed manually via `LuasnipUnlinkCurrent` if `delete_check_events` is not
-  enabled (set to eg. `'TextChanged'`).
+- `keep_roots`: Whether snippet-roots should be linked. See
+  [Basics-Snippet-Insertion](#snippet-insertion) for more context.
+- `link_roots`: Whether snippet-roots should be linked. See
+  [Basics-Snippet-Insertion](#snippet-insertion) for more context.
+- `link_children`: Whether children should be linked. See
+  [Basics-Snippet-Insertion](#snippet-insertion) for more context.
+- `history` (deprecated): if not nil, `keep_roots`, `link_roots`, and
+  `link_children` will bet set to the value of `history`.  
+  This is just to ensure backwards-compatibility.
 - `update_events`: Choose which events trigger an update of the active nodes'
   dependents. Default is just `'InsertLeave'`, `'TextChanged,TextChangedI'`
   would update on every change.
@@ -3165,8 +3446,8 @@ These are the settings you can provide to `luasnip.setup()`:
   	update_events = {"TextChanged", "TextChangedI"}
   })
   ```
-- `region_check_events`: Events on which to leave the current snippet if the
-  cursor is outside its' 'region'. Disabled by default, `'CursorMoved'`,
+- `region_check_events`: Events on which to leave the current snippet-root if
+  the cursor is outside its' 'region'. Disabled by default, `'CursorMoved'`,
   `'CursorHold'` or `'InsertEnter'` seem reasonable.
 - `delete_check_events`: When to check if the current snippet was deleted, and
   if so, remove it from the history. Off by default, `'TextChanged'` (perhaps
@@ -3223,6 +3504,77 @@ These are the settings you can provide to `luasnip.setup()`:
   Enabling this means that the definition of any snippet can be jumped to via
   [Extras-Snippet-Location](#snippet-location), but also entails slightly
   increased memory consumption (and load-time, but it's not really noticeable).
+
+# Troubleshooting
+
+## Adding Snippets
+
+<a id="troubleshooting-adding-snippets-loaders"></a>
+### Loaders
+
+* **Filetypes**. LuaSnip uses `all` as the global filetype. As most snippet
+  collections don't explicitly target LuaSnip, they may not provide global
+  snippets for this filetype, but another, like `_` (`honza/vim-snippets`).
+  In these cases, it's necessary to extend LuaSnip's global filetype with
+  the collection's global filetype:
+  ```lua
+  ls.filetype_extend("all", { "_" })
+  ```
+
+  In general, if some snippets don't show up when loading a collection, a good
+  first step is checking the filetype LuaSnip is actually looking into (print
+  them for the current buffer via `:lua
+  print(vim.inspect(require("luasnip").get_snippet_filetypes()))`), against the
+  one the missing snippet is provided for (in the collection).  
+  If there is indeed a mismatch, `filetype_extend` can be used to also search
+  the collection's filetype:
+  ```lua
+  ls.filetype_extend("<luasnip-filetype>", { "<collection-filetype>" })
+  ```
+
+* **Non-default `ft_func` loading**. As we only load `lazy_load`ed snippets on
+  some events, `lazy_load` will probably not play nice when a non-default
+  `ft_func` is used: if it depends on e.g. the cursor position, only the
+  filetypes for the cursor position when the `lazy_load` events are triggered
+  will be loaded. Check [Extras-Filetype-Function](#filetype-functions)'s
+  `extend_load_ft` for a solution.
+
+### General
+
+* **Snippets sharing triggers**. If multiple snippets could be triggered at
+  the current buffer-position, the snippet that was defined first in one's
+  configuration will be expanded first. As a small, real-world LaTeX math
+  example, given the following two snippets with triggers `.ov` and `ov`:
+  
+  ```lua
+  postfix( -- Insert over-line command to text via post-fix
+      { trig = ".ov", snippetType = "autosnippet" },
+      {
+          f(function(_, parent)
+              return "\\overline{" .. parent.snippet.env.POSTFIX_MATCH .. "}"
+          end, {}),
+      }
+  ),
+  s( -- Insert over-line command
+      { trig = "ov", snippetType="autosnippet" },
+      fmt(
+          [[\overline{<>}]],
+          { i(1) },
+          { delimiters = "<>" }
+      )
+  ),
+  ```
+  
+  If one types `x` followed by `.ov`, the postfix snippet expands producing
+  `\overline{x}`. However, if the `postfix` snippet above is defined *after*
+  the normal snippet `s`, then the same key press sequence produces
+  `x.\overline{}`.
+  This behaviour can be overridden by explicitly providing a priority to
+  such snippets. For example, in the above code, if the `postfix` snippet
+  was defined after the normal snippet `s`, then adding `priority=1001` to the
+  `postfix` snippet will cause it to expand as if it were defined before
+  the normal snippet `s`. Snippet `priority` is discussed in the
+   [Snippets section](https://github.com/L3MON4D3/LuaSnip/blob/master/DOC.md#snippets) of the documentation.
 
 # API
 
@@ -3302,11 +3654,19 @@ These are the settings you can provide to `luasnip.setup()`:
       byte-positions.
       If the variables don't have to be populated with the correct values, it's
       safe to remove the text manually.
-    - `expand_params`: table for overriding the `trigger` used in the snippet
-      and setting the `captures` (useful for pattern-triggered nodes where the
-      trigger has to be changed from the pattern to the actual text triggering the
-      node).
-      Pass as `trigger` and `captures`.
+    - `expand_params`: table, override `trigger`, `captures` or environment of
+      the snippet.  
+      This is useful for manually expanding snippets where the trigger passed
+      via `trig` is not the text triggering the snippet, or those which expect
+      `captures` (basically, snippets with a non-plaintext `trigEngine`).  
+
+      One example:
+      ```lua
+      snip_expand(snip, {
+      	trigger = "override_trigger",
+      	captures = {"first capture", "second capture"},
+      	env_override = { this_key = "some value", other_key = {"multiple", "lines"}, TM_FILENAME = "some_other_filename.lua" }
+      })
     - `pos`: position (`{line, col}`), (0,0)-indexed (in bytes, as returned by
       `nvim_win_get_cursor()`), where the snippet should be expanded. The
       snippet will be put between `(line,col-1)` and `(line,col)`. The snippet
@@ -3359,14 +3719,11 @@ These are the settings you can provide to `luasnip.setup()`:
   returned.
 
 - `exit_out_of_region(node)`: checks whether the cursor is still within the
-  range of the snippet `node` belongs to. If yes, no change occurs; if no, the
-  snippet is exited and following snippets' regions are checked and potentially
-  exited (the next active node will be the 0-node of the snippet before the one
-  the cursor is inside.
-  If the cursor isn't inside any snippet, the active node will be the last node
-  in the jumplist).
-  If a jump causes an error (happens mostly because a snippet was deleted), the
-  snippet is removed from the jumplist.
+  range of the root-snippet `node` belongs to. If yes, no change occurs; if no, the
+  root-snippet is exited and its `$0` will be the new active node.  
+  If a jump causes an error (happens mostly because the text of a snippet was
+  deleted), the snippet is removed from the jumplist and the current node set to
+  the end/beginning of the next/previous snippet.
 
 - `store_snippet_docstrings(snippet_table)`: Stores the docstrings of all
   snippets in `snippet_table` to a file
@@ -3431,6 +3788,16 @@ These are the settings you can provide to `luasnip.setup()`:
   (either -1 or 1, for backwards, forwards respectively) leads to, or `nil` if
   the destination could not be determined (most likely because there is no node
   that can be jumped to in the given direction, or there is no active node).
+
+- `activate_node(opts)`: Activate a node in any snippet.
+  `opts` contains the following options:
+  * `pos`, `{[1]: row, [2]: byte-column}?`: The position at which a node should
+    be activated. Defaults to the position of the cursor.
+  * `strict`, `bool?`: If set, throw an error if the node under the cursor can't
+    be jumped into. If not set, fall back to any node of the snippet and enter
+    that instead.
+  * `select`, `bool?`: Whether the text inside the node should be selected.
+    Defaults to true.
 
 Not covered in this section are the various node-constructors exposed by
 the module, their usage is shown either previously in this file or in

@@ -178,6 +178,8 @@ function Node:input_leave(_, dry_run)
 
 	self.mark:update_opts(self:get_passive_ext_opts())
 end
+function Node:input_leave_children() end
+function Node:input_enter_children() end
 
 local function find_dependents(self, position_self, dict)
 	local nodes = {}
@@ -456,6 +458,9 @@ function Node:get_buf_position(opts)
 	end
 end
 
+-- only does something for insert- and snippetNode.
+function Node:set_sibling_rgravs(_, _, _, _) end
+
 -- when an insertNode receives text, its mark/region should contain all the
 -- text that is inserted.
 -- This can be achieved by setting the left and right "right-gravity"(rgrav) of
@@ -501,20 +506,13 @@ end
 --
 -- Unfortunately, we cannot guarantee that two extmarks on the same position
 -- also have the same gravities, for exmample if the text inside a focused node
--- is deleted, and then another unrelated node is focused, the two endpoints
--- will have opposing rgravs.
+-- is deleted, and then another unrelated node is focused, the two endpoints of
+-- the previously focused node will have opposing rgravs.
 -- Maybe this whole procedure could be sped up further if we can assume that
 -- identical endpoints imply identical rgravs.
 local function focus_node(self, lrgrav, rrgrav)
-	local abs_pos = vim.deepcopy(self.absolute_position)
-
 	-- find nodes on path from self to root.
-	local nodes_path = node_util.get_nodes_between(self.parent.snippet, abs_pos)
-	-- nodes_on_path_to_self does not include the outer snippet, insert it here
-	-- (and also insert some dummy-value in abs_pos, such that abs_pos[i] the
-	-- position of node_path[i] in node_path[i-1] is).
-	table.insert(nodes_path, 1, self.parent.snippet)
-	table.insert(abs_pos, 1, 0)
+	local nodes_path = node_util.root_path(self)
 
 	-- direction is the direction away from this node, towards the outside of
 	-- the tree-representation of the snippet.
@@ -523,10 +521,11 @@ local function focus_node(self, lrgrav, rrgrav)
 	for _, direction in ipairs({ -1, 1 }) do
 		local self_direction_endpoint = self.mark:get_endpoint(direction)
 		local direction_rgrav = util.ternary(direction == -1, lrgrav, rrgrav)
+		local effective_direction_rgrav = direction_rgrav
 
 		-- adjust left rgrav of all nodes on path upwards to root/snippet:
 		-- (i st. self and the snippet are both handled)
-		for i = #abs_pos, 1, -1 do
+		for i = 1, #nodes_path do
 			local node = nodes_path[i]
 			local node_direction_endpoint = node.mark:get_endpoint(direction)
 
@@ -541,25 +540,28 @@ local function focus_node(self, lrgrav, rrgrav)
 				break
 			end
 
-			node.mark:set_rgrav(direction, direction_rgrav)
+			node.mark:set_rgrav(direction, effective_direction_rgrav)
+
+			-- Once self's snippet is reached on the root-path, we will only
+			-- adjust nodes self should be completely contained inside.
+			-- Since the rgravs, however, may be set up otherwise (for example
+			-- when focusing on an $0 that is the last node of the snippet), we
+			-- have to adjust them now.
+			if node.snippet == node then
+				effective_direction_rgrav = direction == 1
+			end
 
 			-- can't use node.parent, since that might skip nodes (in the case of
 			-- dynamicNode, for example, the generated snippets parent is not the
 			-- dynamicNode, but its parent).
 			-- also: don't need to check for nil, because the
-			local node_above = nodes_path[i - 1]
-			if
-				node_above
-				and (
-					node_above.type == types.snippetNode
-					or node_above.type == types.snippet
-				)
-			then
+			local node_above = nodes_path[i + 1]
+			if node_above then
 				node_above:set_sibling_rgravs(
+					node,
 					self_direction_endpoint,
-					abs_pos[i],
 					direction,
-					direction_rgrav
+					effective_direction_rgrav
 				)
 			end
 		end
@@ -601,6 +603,33 @@ function Node:set_text(text)
 	if not ok then
 		error("[LuaSnip Failed]: " .. vim.inspect(text))
 	end
+end
+
+-- since parents validate the adjacency, nodes where we don't know anything
+-- about the text inside them just have to assume they haven't been deleted :D
+function Node:extmarks_valid()
+	return true
+end
+
+function Node:linkable()
+	-- linkable if insert or exitNode.
+	return vim.tbl_contains(
+		{ types.insertNode, types.exitNode },
+		rawget(self, "type")
+	)
+end
+function Node:interactive()
+	-- interactive if immediately inside choiceNode.
+	return vim.tbl_contains(
+		{ types.insertNode, types.exitNode },
+		rawget(self, "type")
+	) or rawget(self, "choice") ~= nil
+end
+function Node:leaf()
+	return vim.tbl_contains(
+		{ types.textNode, types.functionNode, types.insertNode, types.exitNode },
+		rawget(self, "type")
+	)
 end
 
 return {
