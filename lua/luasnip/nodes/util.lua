@@ -158,6 +158,8 @@ local function init_node_opts(opts)
 
 	in_node.key = opts.key
 
+	in_node.node_callbacks = opts.node_callbacks or {}
+
 	return in_node
 end
 
@@ -456,7 +458,7 @@ local function first_common_snippet_ancestor_path(a, b)
 end
 
 -- removes focus from `from` and upwards up to the first common ancestor
--- (node!) of `from` and `to`, and then focuses nodes between that f.c.a. and
+-- (node!) of `from` and `to`, and then focuses nodes between that ancestor and
 -- `to`.
 -- Requires that `from` is currently entered/focused, and that no snippet
 -- between `to` and its root is invalid.
@@ -486,7 +488,7 @@ local function refocus(from, to)
 	table.insert(to_snip_path, 1, to)
 
 	-- determine how far to leave: if there is a common snippet, only up to the
-	-- first (from from/to) common node, otherwise leave the one snippet, and
+	-- first common node of from and to, otherwise leave the one snippet, and
 	-- enter the other completely.
 	local final_leave_node, first_enter_node, common_node
 	if first_common_snippet then
@@ -508,24 +510,44 @@ local function refocus(from, to)
 
 	-- leave_children on all from-nodes except the original from.
 	if #from_snip_path > 0 then
-		-- we know that the first node is from.
-		local ok1 = pcall(leave_nodes_between, from.parent.snippet, from, true)
-		-- leave_nodes_between does not affect snippet, so that has to be left
-		-- here.
-		-- snippet does not have input_leave_children, so only input_leave
-		-- needs to be called.
-		local ok2 =
-			pcall(from.parent.snippet.input_leave, from.parent.snippet, true)
+		local ok1, ok2
+		if from.type == types.exitNode then
+			ok1 = pcall(from.input_leave, from, true)
+			ok2 = true
+		else
+			-- we know that the first node is from.
+			ok1 = pcall(leave_nodes_between, from.parent.snippet, from, true)
+			-- leave_nodes_between does not affect snippet, so that has to be left
+			-- here.
+			-- snippet does not have input_leave_children, so only input_leave
+			-- needs to be called.
+			ok2 = pcall(
+				from.parent.snippet.input_leave,
+				from.parent.snippet,
+				true
+			)
+		end
 		if not ok1 or not ok2 then
 			from.parent.snippet:remove_from_jumplist()
 		end
 	end
 	for i = 2, #from_snip_path do
 		local node = from_snip_path[i]
-		local ok1 = pcall(node.input_leave_children, node)
-		local ok2 = pcall(leave_nodes_between, node.parent.snippet, node, true)
-		local ok3 =
-			pcall(node.parent.snippet.input_leave, node.parent.snippet, true)
+		local ok1, ok2, ok3
+		ok1 = pcall(node.input_leave_children, node)
+
+		if node.type == types.exitNode then
+			ok2 = pcall(node.input_leave, node, true)
+			ok3 = true
+		else
+			ok2 = pcall(leave_nodes_between, node.parent.snippet, node, true)
+			ok3 = pcall(
+				node.parent.snippet.input_leave,
+				node.parent.snippet,
+				true
+			)
+		end
+
 		if not ok1 or not ok2 or not ok3 then
 			from.parent.snippet:remove_from_jumplist()
 		end
@@ -583,10 +605,10 @@ local function refocus(from, to)
 		local node = to_snip_path[i]
 		if node.type ~= types.exitNode then
 			node.parent.snippet:input_enter(true)
+			enter_nodes_between(node.parent.snippet, node, true)
 		else
-			to.parent.snippet:input_leave(true)
+			node:input_enter(true)
 		end
-		enter_nodes_between(node.parent.snippet, node, true)
 		node:input_enter_children()
 	end
 	if #to_snip_path > 0 then
@@ -596,6 +618,17 @@ local function refocus(from, to)
 			to.parent.snippet:input_leave(true)
 		end
 		enter_nodes_between(to.parent.snippet, to, true)
+	end
+
+	-- it may be that we only leave nodes in this process (happens if to is a
+	-- parent of from).
+	-- If that is the case, we will not explicitly focus on to, and it may be
+	-- that focus is even lost if it was focused previously (leave may trigger
+	-- update, update may change focus)
+	-- To prevent this, just call focus here, which is pretty close to a noop
+	-- if to is already focused.
+	if to then
+		to:focus()
 	end
 end
 

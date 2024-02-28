@@ -1,4 +1,6 @@
 local util = require("luasnip.util.util")
+local select_util = require("luasnip.util.select")
+local time_util = require("luasnip.util.time")
 local lazy_vars = {}
 
 -- Variables defined in https://code.visualstudio.com/docs/editor/userdefinedsnippets#_variables
@@ -109,6 +111,12 @@ function lazy_vars.CURRENT_SECONDS_UNIX()
 	return tostring(os.time())
 end
 
+function lazy_vars.CURRENT_TIMEZONE_OFFSET()
+	return time_util
+		.get_timezone_offset(os.time())
+		:gsub("([+-])(%d%d)(%d%d)$", "%1%2:%3")
+end
+
 -- For inserting random values
 
 math.randomseed(os.time())
@@ -156,7 +164,7 @@ local function eager_vars(info)
 	vars.TM_LINE_INDEX = tostring(pos[1])
 	vars.TM_LINE_NUMBER = tostring(pos[1] + 1)
 	vars.LS_SELECT_RAW, vars.LS_SELECT_DEDENT, vars.TM_SELECTED_TEXT =
-		util.get_selection()
+		select_util.retrieve()
 	-- These are for backward compatibility, for now on all builtins that are not part of TM_ go in LS_
 	vars.SELECT_RAW, vars.SELECT_DEDENT =
 		vars.LS_SELECT_RAW, vars.LS_SELECT_DEDENT

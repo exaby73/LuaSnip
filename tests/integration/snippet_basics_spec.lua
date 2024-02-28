@@ -8,7 +8,6 @@ describe("snippets_basic", function()
 
 	before_each(function()
 		helpers.clear()
-		ls_helpers.setup_jsregexp()
 		ls_helpers.session_setup_luasnip()
 
 		screen = Screen.new(50, 3)
@@ -1116,7 +1115,7 @@ describe("snippets_basic", function()
 		it('trigEngine "' .. engine .. '" works', function()
 			exec_lua(
 				[[
-				trigEngine, trig, body, doctrig = ...
+				trigEngine, trig = ...
 				snip = s({trig = trig, docTrig = "3", trigEngine = trigEngine}, {t"c1: ", l(l.CAPTURE1)})
 				ls.add_snippets("all", {snip})
 			]],
@@ -1135,6 +1134,37 @@ describe("snippets_basic", function()
 			assert.is_true(
 				exec_lua([[return snip:get_docstring()[1] == "c1: 3$0"]])
 			)
+		end)
+	end
+
+	for engine, trig in pairs(engine_data) do
+		it('trigEngine "' .. engine .. '" respects `max_len`', function()
+			exec_lua(
+				[[
+				trigEngine, trig = ...
+				snip = s({trig=trig, wordTrig=false, trigEngine=trigEngine, trigEngineOpts={max_len = 2}}, {t"c1: ", l(l.CAPTURE1)})
+				ls.add_snippets("all", {snip})
+			]],
+				engine,
+				trig
+			)
+			feed("i<Space>33")
+			exec_lua("ls.expand()")
+			screen:expect({
+				grid = [[
+				 c1: 33^                                           |
+				{0:~                                                 }|
+				{2:-- INSERT --}                                      |]],
+			})
+
+			feed("<Cr>333")
+			exec_lua("ls.expand()")
+			screen:expect({
+				grid = [[
+				 c1: 33                                           |
+				3c1: 33^                                           |
+				{2:-- INSERT --}                                      |]],
+			})
 		end)
 	end
 
@@ -1400,5 +1430,66 @@ describe("snippets_basic", function()
 		exec_lua([[ls.unlink_current()]])
 		exec_lua([[ls.jump( 1)]])
 		screen:expect({ unchanged = true })
+	end)
+
+	it("node-event is not triggered twice for exitNode.", function()
+		exec_lua([[
+			counter = 0
+			snip = s("mk", t"asdf", {callbacks = {[-1] = {[events.leave] = function()
+				counter = counter + 1
+			end}}})
+		]])
+		exec_lua([[ls.snip_expand(snip)]])
+		assert.are.same(1, exec_lua("return counter"))
+
+		-- +1 for entering the exit-node of the second expansion.
+		exec_lua([[ls.snip_expand(snip)]])
+		assert.are.same(2, exec_lua("return counter"))
+	end)
+
+	it("node-callbacks are executed correctly.", function()
+		exec_lua([[
+			enter_qwer = false
+			enter_qwer_via_parent = false
+
+			snip = s("foo", {
+				t"asdf", i(1, "qwer", {node_callbacks = {[events.enter] = function()
+					enter_qwer = true
+				end}})
+			}, {callbacks = {[1] = { [events.enter] = function()
+				enter_qwer_via_parent = true
+			end}} } )
+
+			ls.snip_expand(snip)
+		]])
+
+		assert.are.same(true, exec_lua("return enter_qwer"))
+		assert.are.same(true, exec_lua("return enter_qwer_via_parent"))
+
+		exec_lua([[
+			enter_snode = false
+			enter_snode_m1 = false
+			enter_snode_via_parent = false
+
+			snip = s("foo", {
+				sn(1, {t"qwer"}, {
+					node_callbacks = {[events.enter] = function()
+						enter_snode = true
+					end},
+					callbacks = { [-1] = {
+						[events.enter] = function()
+							enter_snode_m1 = true
+						end }}
+				} )
+			}, {callbacks = {[1] = { [events.enter] = function()
+				enter_snode_via_parent = true
+			end}}, } )
+
+			ls.snip_expand(snip)
+		]])
+
+		assert.are.same(true, exec_lua("return enter_snode"))
+		assert.are.same(true, exec_lua("return enter_snode_m1"))
+		assert.are.same(true, exec_lua("return enter_snode_via_parent"))
 	end)
 end)
